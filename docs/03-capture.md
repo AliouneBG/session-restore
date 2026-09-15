@@ -81,6 +81,35 @@ arguments) rather than failing. Record `command_line = NULL`, never a guess.
 > — rather than replaying a secret onto a command line where it will show up in
 > Task Manager and any local process listing.
 
+### Browser window titles are page data, not app metadata
+
+A browser window's Win32 title is the **current page title**:
+
+```
+"AliouneBG/session-restore and 1 more page - Profile 1 - Microsoft Edge"
+"<page title> - Mozilla Firefox Private Browsing"
+```
+
+This matters more than it looks. If the agent stores `windows.title` verbatim for every
+window, then private browsing page titles land in the plaintext `windows` table — routing
+around the encrypted `tabs_private` path entirely. The extension half would be airtight
+and the agent half would leak beside it.
+
+**Rule: never store a raw window title for a process identified as a browser.** For
+browser windows, store `title = NULL` and rely on the extension for tab data, which is
+the component that knows what is private. The browser and profile identity is already
+captured in `browser_windows`; the title adds nothing the extension does not supply
+better.
+
+Detection is by `app_key` against the known-browser list, which is checked *before* the
+title is read — not by pattern-matching the title for markers like "Private Browsing".
+Those markers are localized, differ per browser, and are trivially spoofed by any page
+that sets `document.title`. Identify the process, then decide; never parse the title to
+decide whether the title is sensitive.
+
+This applies to the window `EVENT_OBJECT_NAMECHANGE` handler too, which would otherwise
+stream page titles into the journal on every navigation.
+
 ### Window geometry
 
 Use `GetWindowPlacement`, not `GetWindowRect`. `GetWindowPlacement` returns the

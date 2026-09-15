@@ -36,6 +36,12 @@ overstates its protection is worse than one that is clear about its limits.
 | **C3 Sensitive args** | command lines | Plaintext **after redaction** | Yes |
 | **C4 Private browsing** | incognito URLs and titles | **AES-256-GCM** | **Never** |
 
+**Window titles are classified by owning process, not by content.** A browser window's
+title is the page title, so it is C2 — or C4 if the window is private. Since the agent
+cannot reliably tell which browser window is private (and must not try to, by
+title-matching), it stores **no title at all** for any browser process. See
+[03-capture.md](03-capture.md). Titles for non-browser applications stay C1.
+
 ## Encryption design (C4)
 
 ```

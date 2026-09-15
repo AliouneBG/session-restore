@@ -132,6 +132,8 @@ CREATE TABLE windows (
   snapshot_id  INTEGER NOT NULL,
   window_key   TEXT NOT NULL,   -- stable-ish within a snapshot
   app_key      TEXT NOT NULL,
+  -- ALWAYS NULL when is_browser = 1: a browser window's title is the page title,
+  -- which for a private window is C4 data. See 03-capture.md and 06-privacy-security.md.
   title        TEXT,
   display_key  TEXT,
   -- GetWindowPlacement: restored (normal) rect, independent of current show state

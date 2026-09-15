@@ -1,0 +1,11 @@
+[package]
+name = "sr-relay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Thin stdio<->named-pipe bridge spawned by the browser"
+
+[dependencies]
+sr-proto = { path = "../sr-proto" }
+serde_json = { workspace = true }

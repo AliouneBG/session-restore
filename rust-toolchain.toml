@@ -1,0 +1,6 @@
+# Pinned to the GNU *host* toolchain, not just the target: `channel = "stable"` would
+# resolve to the MSVC host, which needs link.exe. The dev machine has no MSVC linker
+# and Build Tools needs admin. windows-rs and COM are verified working here.
+# See docs/adr/0006. MSVC remains the intended release target; both must stay buildable.
+[toolchain]
+channel = "stable-x86_64-pc-windows-gnu"
