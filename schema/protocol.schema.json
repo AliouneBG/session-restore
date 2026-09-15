@@ -1,0 +1,256 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://sessionrestore.local/schema/protocol.schema.json",
+  "title": "SessionRestoreProtocol",
+  "description": "Wire protocol between the browser extension and the session agent. Source of truth for both the TypeScript and Rust type definitions; see docs/05-ipc-protocol.md.",
+  "type": "object",
+  "definitions": {
+    "ProtocolVersion": {
+      "type": "integer",
+      "const": 1,
+      "description": "Bumped only when the meaning of an existing field changes. Additive changes do not bump it."
+    },
+    "BrowserKind": {
+      "type": "string",
+      "enum": ["chrome", "edge", "firefox"]
+    },
+    "MessageSource": {
+      "type": "object",
+      "description": "Stamped by the relay, never by the extension. The extension cannot be trusted to report its own browser and profile.",
+      "properties": {
+        "browser": { "$ref": "#/definitions/BrowserKind" },
+        "profile_key": {
+          "type": "string",
+          "description": "Hash of the browser profile directory. Distinguishes Work from Personal without storing the path."
+        },
+        "ext_version": { "type": "string" }
+      },
+      "required": ["browser", "profile_key", "ext_version"],
+      "additionalProperties": false
+    },
+    "Envelope": {
+      "type": "object",
+      "properties": {
+        "v": { "$ref": "#/definitions/ProtocolVersion" },
+        "id": { "type": "string", "description": "ULID, unique per message" },
+        "type": { "type": "string" },
+        "ts": { "type": "integer", "description": "Unix epoch milliseconds" },
+        "src": { "$ref": "#/definitions/MessageSource" },
+        "body": { "type": "object" }
+      },
+      "required": ["v", "id", "type", "ts", "body"],
+      "additionalProperties": false
+    },
+
+    "WindowState": {
+      "type": "string",
+      "enum": ["normal", "maximized", "minimized", "fullscreen"]
+    },
+
+    "BrowserWindowDelta": {
+      "type": "object",
+      "properties": {
+        "op": { "type": "string", "enum": ["upsert", "remove"] },
+        "window_id": { "type": "string" },
+        "private": { "type": "boolean", "default": false },
+        "state": { "$ref": "#/definitions/WindowState" },
+        "x": { "type": "integer" },
+        "y": { "type": "integer" },
+        "w": { "type": "integer" },
+        "h": { "type": "integer" },
+        "focused": { "type": "boolean", "default": false }
+      },
+      "required": ["op", "window_id"],
+      "additionalProperties": false
+    },
+
+    "TabDelta": {
+      "type": "object",
+      "description": "A single tab change. `private: true` is the only routing signal the agent needs; such rows go to tabs_private, encrypted and TTL'd, and are never journaled in plaintext nor made cloud-eligible.",
+      "properties": {
+        "op": { "type": "string", "enum": ["upsert", "remove"] },
+        "tab_key": {
+          "type": "string",
+          "description": "Stable within a browser session: '<window_id>:<tab_id>'"
+        },
+        "window_id": { "type": "string" },
+        "group_key": { "type": ["string", "null"] },
+        "index": { "type": "integer", "minimum": 0 },
+        "url": { "type": "string" },
+        "title": { "type": "string" },
+        "favicon_hash": { "type": ["string", "null"] },
+        "pinned": { "type": "boolean", "default": false },
+        "active": { "type": "boolean", "default": false },
+        "muted": { "type": "boolean", "default": false },
+        "last_accessed": { "type": ["integer", "null"] },
+        "private": { "type": "boolean", "default": false },
+        "restorable": {
+          "type": "boolean",
+          "default": true,
+          "description": "False for schemes the browser forbids programmatic navigation to (chrome://, devtools://, view-source:)."
+        }
+      },
+      "required": ["op", "tab_key", "window_id"],
+      "additionalProperties": false
+    },
+
+    "TabGroupDelta": {
+      "type": "object",
+      "description": "Chrome/Edge only. Firefox has no tab group API and never sends these.",
+      "properties": {
+        "op": { "type": "string", "enum": ["upsert", "remove"] },
+        "group_key": { "type": "string" },
+        "window_id": { "type": "string" },
+        "title": { "type": ["string", "null"] },
+        "color": { "type": ["string", "null"] },
+        "collapsed": { "type": "boolean", "default": false }
+      },
+      "required": ["op", "group_key", "window_id"],
+      "additionalProperties": false
+    },
+
+    "StateBody": {
+      "type": "object",
+      "description": "Shared body shape for tab_delta and full_state.",
+      "properties": {
+        "windows": { "type": "array", "items": { "$ref": "#/definitions/BrowserWindowDelta" } },
+        "tabs": { "type": "array", "items": { "$ref": "#/definitions/TabDelta" }, "maxItems": 200 },
+        "groups": { "type": "array", "items": { "$ref": "#/definitions/TabGroupDelta" } }
+      },
+      "required": ["windows", "tabs", "groups"],
+      "additionalProperties": false
+    },
+
+    "HelloBody": {
+      "type": "object",
+      "properties": {
+        "ext_version": { "type": "string" },
+        "browser_version": { "type": "string" },
+        "incognito_access": { "type": "boolean" },
+        "capabilities": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["tab_groups", "discarded_create", "on_suspend"] },
+          "description": "Lets the agent adapt without version sniffing. Firefox reports discarded_create and on_suspend but not tab_groups; Chromium the reverse."
+        }
+      },
+      "required": ["ext_version", "browser_version", "incognito_access", "capabilities"],
+      "additionalProperties": false
+    },
+
+    "HelloAckBody": {
+      "type": "object",
+      "properties": {
+        "agent_version": { "type": "string" },
+        "protocol_version": { "$ref": "#/definitions/ProtocolVersion" },
+        "capture_enabled": { "type": "boolean" },
+        "capture_private": {
+          "type": "boolean",
+          "description": "When false the extension drops private events at the source rather than sending them. Cheapest enforcement point is the earliest one."
+        },
+        "reconcile_interval_s": { "type": "integer", "minimum": 60 }
+      },
+      "required": ["agent_version", "protocol_version", "capture_enabled", "capture_private", "reconcile_interval_s"],
+      "additionalProperties": false
+    },
+
+    "RestoreTab": {
+      "type": "object",
+      "properties": {
+        "url": { "type": "string" },
+        "title": { "type": "string" },
+        "index": { "type": "integer", "minimum": 0 },
+        "pinned": { "type": "boolean", "default": false },
+        "active": { "type": "boolean", "default": false },
+        "group_key": { "type": ["string", "null"] }
+      },
+      "required": ["url", "index"],
+      "additionalProperties": false
+    },
+
+    "RestoreGroup": {
+      "type": "object",
+      "properties": {
+        "group_key": { "type": "string" },
+        "title": { "type": ["string", "null"] },
+        "color": { "type": ["string", "null"] },
+        "collapsed": { "type": "boolean", "default": false }
+      },
+      "required": ["group_key"],
+      "additionalProperties": false
+    },
+
+    "RestoreWindow": {
+      "type": "object",
+      "properties": {
+        "window_id": { "type": "string" },
+        "private": { "type": "boolean", "default": false },
+        "state": { "$ref": "#/definitions/WindowState" },
+        "x": { "type": "integer" },
+        "y": { "type": "integer" },
+        "w": { "type": "integer" },
+        "h": { "type": "integer" },
+        "tabs": { "type": "array", "items": { "$ref": "#/definitions/RestoreTab" } },
+        "groups": { "type": "array", "items": { "$ref": "#/definitions/RestoreGroup" } }
+      },
+      "required": ["window_id", "tabs"],
+      "additionalProperties": false
+    },
+
+    "RestoreSessionBody": {
+      "type": "object",
+      "properties": {
+        "run_id": { "type": "integer" },
+        "lazy": {
+          "type": "boolean",
+          "default": true,
+          "description": "Create tabs unloaded. Firefox uses tabs.create({discarded:true}); Chromium uses the placeholder page."
+        },
+        "windows": { "type": "array", "items": { "$ref": "#/definitions/RestoreWindow" } }
+      },
+      "required": ["run_id", "windows"],
+      "additionalProperties": false
+    },
+
+    "RestoreResultItem": {
+      "type": "object",
+      "properties": {
+        "tab_key": { "type": "string" },
+        "status": { "type": "string", "enum": ["created", "already_open", "skipped", "failed"] },
+        "detail": { "type": ["string", "null"] }
+      },
+      "required": ["tab_key", "status"],
+      "additionalProperties": false
+    },
+
+    "RestoreResultBody": {
+      "type": "object",
+      "properties": {
+        "run_id": { "type": "integer" },
+        "items": { "type": "array", "items": { "$ref": "#/definitions/RestoreResultItem" } }
+      },
+      "required": ["run_id", "items"],
+      "additionalProperties": false
+    },
+
+    "SettingsChangedBody": {
+      "type": "object",
+      "properties": {
+        "capture_enabled": { "type": "boolean" },
+        "capture_private": { "type": "boolean" },
+        "reconcile_interval_s": { "type": "integer", "minimum": 60 }
+      },
+      "required": ["capture_enabled", "capture_private", "reconcile_interval_s"],
+      "additionalProperties": false
+    },
+
+    "AgentUnavailableBody": {
+      "type": "object",
+      "properties": {
+        "reason": { "type": "string", "enum": ["not_running", "pipe_error", "version_too_new"] },
+        "detail": { "type": ["string", "null"] }
+      },
+      "required": ["reason"],
+      "additionalProperties": false
+    }
+  }
+}

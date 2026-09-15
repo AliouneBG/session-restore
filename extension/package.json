@@ -1,0 +1,26 @@
+{
+  "name": "session-restore-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Captures and restores browser tabs for Session Restore",
+  "scripts": {
+    "gen:proto": "json2ts -i ../schema/protocol.schema.json -o src/shared/protocol.generated.ts --unreachableDefinitions --no-additionalProperties --bannerComment \"/* GENERATED from schema/protocol.schema.json - do not edit by hand. Run: npm run gen:proto */\"",
+    "build": "npm run gen:proto && node build.mjs",
+    "build:chrome": "npm run gen:proto && node build.mjs --target=chrome",
+    "build:firefox": "npm run gen:proto && node build.mjs --target=firefox",
+    "watch": "node build.mjs --watch",
+    "typecheck": "npm run gen:proto && tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run test"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "@types/node": "^22.10.2",
+    "esbuild": "^0.24.2",
+    "json-schema-to-typescript": "^15.0.3",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
