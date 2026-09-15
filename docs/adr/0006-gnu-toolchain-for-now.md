@@ -43,6 +43,33 @@ assumed, with a probe exercising every Win32 area this project depends on:
 COM instantiation working is the one that mattered; it is the piece most likely to be
 weak off-MSVC, and it is not optional for launching UWP apps.
 
+## What the GNU target additionally needs (learned the hard way)
+
+rustup's `rust-mingw` component provides a **linker only**. That is enough for pure-Rust
+crates — the probe above linked fine on it — but not for the real dependency set:
+
+| Crate | Needs | Why |
+|---|---|---|
+| `libsqlite3-sys` (rusqlite `bundled`) | `gcc.exe` | Compiles SQLite from C source |
+| `windows-sys` (via `getrandom`) | `dlltool.exe` | Generates import libraries |
+
+So a full MinGW-w64 is required:
+
+```
+winget install --id BrechtSanders.WinLibs.POSIX.MSVCRT -e
+```
+
+**Use the MSVCRT variant, not UCRT.** Rust's `x86_64-pc-windows-gnu` links against
+MSVCRT; pairing it with a UCRT MinGW mixes C runtimes, which is a subtle and
+unpleasant class of bug.
+
+Both the MinGW `bin` directory and `~/.cargo/bin` must be on `PATH`. The winget
+installers add them to the user PATH automatically, but an already-running shell keeps
+its stale environment — open a new terminal after installing.
+
+This is a point in MSVC's favor: it needs one install, not two, and `rusqlite` builds
+against it without a separate C compiler.
+
 ## Why MSVC remains the ship target
 
 - It is what Windows users' debuggers, crash dumps, and symbol servers expect. PDB
