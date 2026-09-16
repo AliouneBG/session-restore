@@ -592,11 +592,18 @@ fn run() -> Result<()> {
 
     let db = Arc::new(Mutex::new(db));
     let keys = Arc::new(keys);
-    let shared = Arc::new(Shared {
-        db: Arc::clone(&db),
-        keys: Arc::clone(&keys),
-        pending_restore: Mutex::new(PendingRestore::new(pending)),
-    });
+    // A browser connecting while the review window is open must wait for the answer
+    // rather than be handed the whole session.
+    let pending_restore = if restore_mode == "ask" {
+        PendingRestore::awaiting_review(pending)
+    } else {
+        PendingRestore::new(pending)
+    };
+    let shared = Arc::new(Shared::new(
+        Arc::clone(&db),
+        Arc::clone(&keys),
+        pending_restore,
+    ));
 
     let sweeper = Arc::clone(&shared);
     std::thread::spawn(move || loop {

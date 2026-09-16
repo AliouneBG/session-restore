@@ -29,11 +29,11 @@ impl Harness {
 
         let db = Db::open(&dir.join("sessions.db")).unwrap();
         let keys = KeyManager::new(&dir);
-        let shared = Arc::new(Shared {
-            db: Arc::new(Mutex::new(db)),
-            keys: Arc::new(keys),
-            pending_restore: Mutex::new(PendingRestore::new(None)),
-        });
+        let shared = Arc::new(Shared::new(
+            Arc::new(Mutex::new(db)),
+            Arc::new(keys),
+            PendingRestore::new(None),
+        ));
 
         // Unique name per test so a real agent (or a parallel test) is never contended.
         let pipe = format!("\\\\.\\pipe\\SessionRestoreTest.{}", sr_proto::new_id());

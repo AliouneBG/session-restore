@@ -60,11 +60,11 @@ impl Harness {
             .unwrap();
 
         let keys = KeyManager::new(&dir);
-        let shared = Arc::new(Shared {
-            db: Arc::new(Mutex::new(db)),
-            keys: Arc::new(keys),
-            pending_restore: Mutex::new(PendingRestore::new(Some(snap))),
-        });
+        let shared = Arc::new(Shared::new(
+            Arc::new(Mutex::new(db)),
+            Arc::new(keys),
+            PendingRestore::new(Some(snap)),
+        ));
 
         let pipe = format!("\\\\.\\pipe\\SessionRestoreTest.{}", sr_proto::new_id());
         let server_shared = Arc::clone(&shared);
@@ -640,4 +640,99 @@ fn a_private_window_alone_does_not_start_a_browser() {
     let wanted: std::collections::HashSet<String> = ["w-priv".to_string()].into_iter().collect();
     let plan = sr_agent::restore::browsers_to_launch(&db, snapshot_id, &wanted).unwrap();
     assert!(plan.is_empty(), "started a browser for a private window: {plan:?}");
+}
+
+/// The race this closes: at logon the review window and the browser start together,
+/// and the browser almost always wins. Every checkbox in that window was bypassed
+/// seconds before the user could tick one.
+#[test]
+fn a_browser_that_connects_before_the_review_is_answered_waits_for_it() {
+    let h = Harness::with_previous_session(&[
+        ("w-old:t1", "https://one.test/"),
+        ("w-old:t2", "https://two.test/"),
+    ]);
+    {
+        let mut pending = h.shared.pending_restore.lock().unwrap();
+        *pending = PendingRestore::awaiting_review(pending.snapshot_id);
+    }
+
+    let mut c = h.connect();
+    send(&mut c, hello("chrome"));
+    assert_eq!(recv(&mut c).kind, "hello_ack");
+    send(&mut c, hello("chrome"));
+    assert_eq!(
+        recv(&mut c).kind,
+        "hello_ack",
+        "offered the whole session while the user was still choosing"
+    );
+
+    // Answering pushes the offer to the browser that was made to wait.
+    {
+        let mut pending = h.shared.pending_restore.lock().unwrap();
+        pending.set_selection(BrowserSelection {
+            windows: ["w-old".to_string()].into_iter().collect(),
+            tabs: ["w-old:t2".to_string()].into_iter().collect(),
+            declined: false,
+        });
+    }
+    sr_agent::server::offer_to_connected(&h.shared);
+
+    let offer = recv(&mut c);
+    assert_eq!(offer.kind, "restore_session");
+    let tabs = offer.body["windows"][0]["tabs"].as_array().unwrap();
+    assert_eq!(tabs.len(), 1, "the deferred offer ignored the review");
+    assert_eq!(tabs[0]["url"], "https://two.test/");
+}
+
+/// Dismissing decides nothing, but it must still release a browser left waiting.
+#[test]
+fn dismissing_the_review_releases_a_waiting_browser() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    {
+        let mut pending = h.shared.pending_restore.lock().unwrap();
+        *pending = PendingRestore::awaiting_review(pending.snapshot_id);
+    }
+
+    let mut c = h.connect();
+    send(&mut c, hello("chrome"));
+    assert_eq!(recv(&mut c).kind, "hello_ack");
+    send(&mut c, hello("chrome"));
+    assert_eq!(recv(&mut c).kind, "hello_ack", "offered while the review was open");
+
+    {
+        let mut pending = h.shared.pending_restore.lock().unwrap();
+        pending.review_dismissed();
+    }
+    sr_agent::server::offer_to_connected(&h.shared);
+
+    assert_eq!(
+        recv(&mut c).kind,
+        "restore_session",
+        "a dismissed review left the browser waiting forever"
+    );
+}
+
+/// A browser that connects *after* the answer takes the normal path, not the push.
+#[test]
+fn a_browser_that_connects_after_the_review_is_offered_normally() {
+    let h = Harness::with_previous_session(&[
+        ("w-old:t1", "https://one.test/"),
+        ("w-old:t2", "https://two.test/"),
+    ]);
+    {
+        let mut pending = h.shared.pending_restore.lock().unwrap();
+        *pending = PendingRestore::awaiting_review(pending.snapshot_id);
+        pending.set_selection(BrowserSelection {
+            windows: ["w-old".to_string()].into_iter().collect(),
+            tabs: ["w-old:t1".to_string()].into_iter().collect(),
+            declined: false,
+        });
+    }
+
+    let mut c = h.connect();
+    send(&mut c, hello("chrome"));
+    assert_eq!(recv(&mut c).kind, "hello_ack");
+    let offer = recv(&mut c);
+    assert_eq!(offer.kind, "restore_session");
+    assert_eq!(offer.body["windows"][0]["tabs"].as_array().unwrap().len(), 1);
 }

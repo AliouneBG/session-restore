@@ -21,6 +21,31 @@ pub struct Shared {
     pub keys: Arc<KeyManager>,
     /// The snapshot captured at startup, and who has already been offered it.
     pub pending_restore: Mutex<PendingRestore>,
+    /// Browsers connected right now, so an answered review can reach them.
+    ///
+    /// The extension says `hello` once per service-worker start and never again on a
+    /// reconnect, so "we will offer on its next hello" is not a plan - it may not send
+    /// another one for hours. Deferring an offer therefore means being able to push it.
+    connections: Mutex<Vec<Connection>>,
+}
+
+impl Shared {
+    pub fn new(db: Arc<Mutex<Db>>, keys: Arc<KeyManager>, pending: PendingRestore) -> Shared {
+        Shared {
+            db,
+            keys,
+            pending_restore: Mutex::new(pending),
+            connections: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+/// One live relay connection, enough to identify it and write to it.
+struct Connection {
+    id: u64,
+    browser: String,
+    profile: String,
+    writer: Arc<Mutex<sr_ipc::PipeConnection>>,
 }
 
 /// Tracks the one restore offer this agent run may make per browser and profile.
@@ -36,10 +61,18 @@ pub struct PendingRestore {
     offered: std::collections::HashSet<String>,
     /// What the user ticked in the review window, once they have answered.
     ///
-    /// `None` means they have not been asked yet (or the review is disabled), in which
-    /// case the whole stored session is offered. That is the historical behaviour and
-    /// stays the default when there is no review to consult.
+    /// `None` means there is no review to consult, in which case the whole stored
+    /// session is offered. That is the historical behaviour and the right default when
+    /// the user was never going to be asked.
     selection: Option<BrowserSelection>,
+    /// True while a review window is open and unanswered.
+    ///
+    /// Distinguishing this from "no review" is the entire point. Both used to be
+    /// `selection: None`, so a browser that connected while the user was still reading
+    /// the review window was offered the whole session - every checkbox in that window
+    /// bypassed, seconds before they made a choice. At logon the browser almost always
+    /// wins that race, so the tab checkboxes were decorative in the common case.
+    awaiting_review: bool,
 }
 
 /// The browser half of a review decision.
@@ -57,12 +90,36 @@ impl PendingRestore {
             snapshot_id,
             offered: std::collections::HashSet::new(),
             selection: None,
+            awaiting_review: false,
         }
+    }
+
+    /// As [`PendingRestore::new`], for a run that will open a review window.
+    pub fn awaiting_review(snapshot_id: Option<i64>) -> Self {
+        PendingRestore {
+            awaiting_review: snapshot_id.is_some(),
+            ..PendingRestore::new(snapshot_id)
+        }
+    }
+
+    /// True while an offer must wait for the user's answer.
+    pub fn is_awaiting_review(&self) -> bool {
+        self.awaiting_review
+    }
+
+    /// Ends the wait without deciding anything.
+    ///
+    /// Dismissing the review window decides nothing (treating a closed window as
+    /// consent would restore a session the user never agreed to), but it does have to
+    /// release browsers that are waiting on an answer, or their offer never arrives.
+    pub fn review_dismissed(&mut self) {
+        self.awaiting_review = false;
     }
 
     /// Records what the review window decided for browser windows and tabs.
     pub fn set_selection(&mut self, selection: BrowserSelection) {
         self.selection = Some(selection);
+        self.awaiting_review = false;
     }
 
     pub fn selection(&self) -> Option<BrowserSelection> {
@@ -117,16 +174,59 @@ pub fn serve_on(name: &str, shared: Arc<Shared>) -> Result<()> {
 
 fn handle_connection(conn: sr_ipc::PipeConnection, shared: Arc<Shared>) -> Result<()> {
     tracing::debug!("connection accepted");
-    let mut writer = conn.try_clone()?;
+    // Shared rather than owned, because a deferred offer is written from the UI thread
+    // when the review is answered, not from this one.
+    let writer = Arc::new(Mutex::new(conn.try_clone()?));
     let mut reader = conn;
     tracing::debug!("connection split for read/write");
 
     // Resolved once from the browser's command line and reused for every message on
     // this connection: one relay is one browser profile, for its whole lifetime.
     let mut profile: Option<String> = None;
+    let registration = ConnectionGuard::new(&shared);
+
+    let result = connection_loop(&mut reader, &writer, &shared, &mut profile, &registration);
+    drop(registration);
+    result
+}
+
+/// Unregisters a connection however its thread ends.
+///
+/// A registry that only shrinks on the happy path would accumulate dead pipe handles
+/// and write deferred offers into them.
+struct ConnectionGuard {
+    shared: Arc<Shared>,
+    id: u64,
+}
+
+impl ConnectionGuard {
+    fn new(shared: &Arc<Shared>) -> ConnectionGuard {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        ConnectionGuard {
+            shared: Arc::clone(shared),
+            id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        let mut conns = self.shared.connections.lock().unwrap();
+        conns.retain(|c| c.id != self.id);
+    }
+}
+
+fn connection_loop(
+    reader: &mut sr_ipc::PipeConnection,
+    writer: &Arc<Mutex<sr_ipc::PipeConnection>>,
+    shared: &Arc<Shared>,
+    profile: &mut Option<String>,
+    registration: &ConnectionGuard,
+) -> Result<()> {
+    let mut registered = false;
 
     loop {
-        let raw = match read_frame(&mut reader, MAX_INBOUND_BYTES) {
+        let raw = match read_frame(reader, MAX_INBOUND_BYTES) {
             Ok(r) => {
                 tracing::debug!(bytes = r.len(), "frame read");
                 r
@@ -152,7 +252,7 @@ fn handle_connection(conn: sr_ipc::PipeConnection, shared: Arc<Shared>) -> Resul
                 "version_too_new",
                 serde_json::json!({ "agent_protocol": sr_proto::PROTOCOL_VERSION }),
             );
-            write_frame(&mut writer, &serde_json::to_string(&reply)?, MAX_OUTBOUND_BYTES)?;
+            write_one(writer, &reply)?;
             continue;
         }
 
@@ -162,19 +262,67 @@ fn handle_connection(conn: sr_ipc::PipeConnection, shared: Arc<Shared>) -> Resul
         // the connection, so the extension silently stopped syncing.
         if profile.is_none() {
             if let Some(pid) = env.src.as_ref().and_then(|s| s.browser_pid) {
-                profile = Some(resolve_profile(pid));
+                *profile = Some(resolve_profile(pid));
             }
         }
 
-        match dispatch(&env, &shared, profile.as_deref()) {
+        // Registered before dispatch, so a `hello` whose offer is deferred can still be
+        // reached when the review is answered a moment later.
+        if !registered {
+            if let Some(browser) = env.src.as_ref().map(|s| s.browser.as_str()) {
+                let mut conns = shared.connections.lock().unwrap();
+                conns.push(Connection {
+                    id: registration.id,
+                    browser: browser.to_string(),
+                    profile: profile.clone().unwrap_or_else(|| "default".into()),
+                    writer: Arc::clone(writer),
+                });
+                registered = true;
+            }
+        }
+
+        match dispatch(&env, shared, profile.as_deref()) {
             Ok(replies) => {
                 for reply in replies {
-                    write_frame(&mut writer, &serde_json::to_string(&reply)?, MAX_OUTBOUND_BYTES)?;
+                    write_one(writer, &reply)?;
                 }
             }
             Err(e) => {
                 tracing::warn!(kind = %env.kind, error = %e, "message could not be handled");
             }
+        }
+    }
+}
+
+fn write_one(writer: &Arc<Mutex<sr_ipc::PipeConnection>>, env: &Envelope) -> Result<()> {
+    let mut w = writer.lock().unwrap();
+    write_frame(&mut *w, &serde_json::to_string(env)?, MAX_OUTBOUND_BYTES)?;
+    Ok(())
+}
+
+/// Sends the restore offer to browsers that connected while the review was open.
+///
+/// Called once the user has answered (or dismissed) the review window. Browsers that
+/// connected before that were deliberately not offered anything, because doing so
+/// would have ignored the choice they were in the middle of making.
+pub fn offer_to_connected(shared: &Arc<Shared>) {
+    let targets: Vec<(String, String, Arc<Mutex<sr_ipc::PipeConnection>>)> = {
+        let conns = shared.connections.lock().unwrap();
+        conns
+            .iter()
+            .map(|c| (c.browser.clone(), c.profile.clone(), Arc::clone(&c.writer)))
+            .collect()
+    };
+
+    for (browser, profile, writer) in targets {
+        match maybe_offer_restore(shared, &browser, &profile) {
+            Ok(Some(offer)) => {
+                if let Err(e) = write_one(&writer, &offer) {
+                    tracing::warn!(browser, error = %e, "could not send the deferred offer");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(browser, error = %e, "could not build the deferred offer"),
         }
     }
 }
@@ -474,6 +622,16 @@ fn reap_missing_for_browser(db: &Db, body: &StateBody, browser: &str, profile: &
 fn maybe_offer_restore(shared: &Shared, browser: &str, profile: &str) -> Result<Option<Envelope>> {
     let (snapshot_id, selection) = {
         let mut pending = shared.pending_restore.lock().unwrap();
+
+        // Do not claim: the offer is still owed, it just cannot be built yet. The user
+        // is looking at the review window right now, and answering it is what decides
+        // which windows and tabs this offer contains. `offer_to_connected` delivers it
+        // the moment they answer.
+        if pending.is_awaiting_review() {
+            tracing::debug!(browser, "restore offer deferred until the review is answered");
+            return Ok(None);
+        }
+
         let selection = pending.selection();
         match pending.claim(browser, profile) {
             Some(id) => (id, selection),

@@ -214,6 +214,16 @@ pub fn run_app(ctx: UiContext) -> Result<()> {
             } => {
                 // Dismissal decides nothing. Treating a closed window as consent would
                 // restore a session the user never agreed to.
+                //
+                // It does have to release browsers waiting on an answer, though. They
+                // were deliberately not offered anything while the window was open, and
+                // without this their offer would never arrive at all.
+                {
+                    let mut pending = shared.pending_restore.lock().unwrap();
+                    pending.review_dismissed();
+                }
+                crate::server::offer_to_connected(&shared);
+
                 review_window = None;
                 review_snapshot = None;
             }
@@ -281,6 +291,11 @@ fn apply_choice(
         tracing::info!("restore declined");
         return;
     }
+
+    // Browsers already running connected before the user answered and were deferred.
+    // They are waiting on exactly the decision that was just made. Deliberately after
+    // the two refusals above, so neither can send an offer on its way out.
+    crate::server::offer_to_connected(shared);
 
     let selected: std::collections::HashSet<&str> =
         choice.apps.iter().map(|s| s.as_str()).collect();
