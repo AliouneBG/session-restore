@@ -143,9 +143,32 @@ pub fn restore_apps(
 ) -> AppRestoreReport {
     let mut report = AppRestoreReport::default();
     let mut launched_pids: HashMap<String, Option<u32>> = HashMap::new();
+    let running = running_app_keys();
 
     // Phase 1-3: launch, cheapest and most exact first, staggered.
     for app in apps {
+        // Already open: place its windows, but do not start it again.
+        //
+        // `--undo` is what made this unavoidable. It restores the applications that
+        // were open before a restore, and they usually still are, so undoing produced
+        // a second VS Code and a second Discord rather than putting anything back.
+        // The same applied to ticking an already-running application in the review
+        // window.
+        //
+        // The trade-off is real: an application with three stored windows and one open
+        // does not get the other two back. Launching it again would not have opened
+        // them either - almost everything here is single-instance and a second launch
+        // just focuses the first - so the choice is between a missing window and a
+        // duplicate process, and the duplicate is the one the user has to clean up.
+        // Placement matches live windows by application identity, not by what this
+        // function launched, so a skipped application is still placed.
+        if running.contains(&app.app_key) && app.tier != Tier::D {
+            report
+                .skipped
+                .push((app.display_name.clone(), "already running".into()));
+            continue;
+        }
+
         match app.tier {
             Tier::D => {
                 report.skipped.push((
@@ -232,6 +255,34 @@ pub fn restore_apps(
     // Phase 5: placement, once windows have had a chance to appear.
     report.placed = place_windows(apps, &launched_pids, current_displays);
     report
+}
+
+/// Applications that already have a window open.
+///
+/// Read from live windows rather than by enumerating processes: an application with no
+/// window cannot show the user anything, so starting it is what they asked for.
+#[cfg(windows)]
+fn running_app_keys() -> std::collections::HashSet<String> {
+    use crate::watcher::{identity, windows as winwatch};
+    let Ok(live) = winwatch::enumerate() else {
+        // Failing open means a duplicate at worst; failing closed would silently
+        // restore nothing at all.
+        return std::collections::HashSet::new();
+    };
+    live.iter()
+        .map(|w| {
+            identity::app_key(
+                w.process.kind,
+                w.process.exe_path.as_deref(),
+                w.process.aumid.as_deref(),
+            )
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn running_app_keys() -> std::collections::HashSet<String> {
+    std::collections::HashSet::new()
 }
 
 /// Waits for launched applications' windows to appear, then places them.

@@ -658,8 +658,11 @@ fn maybe_offer_restore(shared: &Shared, browser: &str, profile: &str) -> Result<
         return Ok(None);
     }
 
-    let run_id = crate::restore::begin_run(&db, snapshot_id, &mode)?;
-    let mut body = crate::restore::build_payload(&db, snapshot_id, browser, profile, run_id)?;
+    // Built before the run is opened, and with a placeholder id, because there may be
+    // nothing to offer. Opening the run first left a `restore_runs` row and an undo
+    // snapshot behind for every browser that had no stored windows - Firefox with one
+    // unrestorable `about:` tab was enough - and `--undo` reads the most recent run.
+    let mut body = crate::restore::build_payload(&db, snapshot_id, browser, profile, 0)?;
 
     // Honour the review's per-window and per-tab choices. Without this the review
     // could show tab checkboxes that did nothing, which is worse than not offering
@@ -678,6 +681,9 @@ fn maybe_offer_restore(shared: &Shared, browser: &str, profile: &str) -> Result<
         tracing::debug!(browser, "nothing stored for this browser; no offer");
         return Ok(None);
     }
+
+    let run_id = crate::restore::begin_run(&db, snapshot_id, &mode)?;
+    body.run_id = run_id;
 
     let tabs: usize = body.windows.iter().map(|w| w.tabs.len()).sum();
     crate::restore::record_items(&db, run_id, &body)?;

@@ -736,3 +736,23 @@ fn a_browser_that_connects_after_the_review_is_offered_normally() {
     assert_eq!(offer.kind, "restore_session");
     assert_eq!(offer.body["windows"][0]["tabs"].as_array().unwrap().len(), 1);
 }
+
+/// A browser with nothing restorable must not leave a run behind. `--undo` reads the
+/// most recent run, so an empty one is not merely untidy: it is the undo point.
+#[test]
+fn a_browser_with_nothing_stored_opens_no_run() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+
+    let mut c = h.connect();
+    send(&mut c, hello("firefox"));
+    assert_eq!(recv(&mut c).kind, "hello_ack");
+    send(&mut c, hello("firefox"));
+    assert_eq!(recv(&mut c).kind, "hello_ack", "offered a session it does not have");
+
+    let db = h.shared.db.lock().unwrap();
+    let runs: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM restore_runs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(runs, 0, "opened a restore run with nothing to restore");
+}
