@@ -6,6 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 description = "Thin stdio<->named-pipe bridge spawned by the browser"
 
+# Deliberately minimal. This is the only component the browser can start, so it links
+# no database, no crypto, and nothing that touches disk (ADR-0002).
 [dependencies]
 sr-proto = { path = "../sr-proto" }
+sr-ipc = { path = "../sr-ipc" }
+anyhow = { workspace = true }
 serde_json = { workspace = true }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+  "Win32_Foundation",
+  "Win32_System_Diagnostics_ToolHelp",
+]

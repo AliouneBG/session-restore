@@ -489,11 +489,21 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sr-ipc",
  "sr-proto",
  "tracing",
  "tracing-subscriber",
  "windows",
  "zeroize",
+]
+
+[[package]]
+name = "sr-ipc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "sha2",
+ "windows",
 ]
 
 [[package]]
@@ -509,8 +519,11 @@ dependencies = [
 name = "sr-relay"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "serde_json",
+ "sr-ipc",
  "sr-proto",
+ "windows",
 ]
 
 [[package]]
