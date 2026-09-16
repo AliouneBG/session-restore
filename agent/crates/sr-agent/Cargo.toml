@@ -20,6 +20,12 @@ rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 
+# UI: WebView2 review window plus the tray icon. wry/tao/tray-icon verified
+# building on the GNU toolchain before being adopted.
+wry = "0.47"
+tao = "0.30"
+tray-icon = "0.19"
+
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.58"
 features = [

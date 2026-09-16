@@ -61,8 +61,8 @@ impl Harness {
 
         let keys = KeyManager::new(&dir);
         let shared = Arc::new(Shared {
-            db: Mutex::new(db),
-            keys,
+            db: Arc::new(Mutex::new(db)),
+            keys: Arc::new(keys),
             pending_restore: Mutex::new(PendingRestore::new(Some(snap))),
         });
 

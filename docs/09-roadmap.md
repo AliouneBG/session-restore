@@ -10,13 +10,17 @@
 | M3 — Restore | **Done.** Browsers get their missing tabs back; applications are relaunched by tier and their windows placed, including across a changed monitor layout or DPI. No review UI, so app restore is opt-in. |
 | M4 — T0 deltas / T2 shutdown | T0 event deltas done. T2 shutdown hook not written. |
 | M5 — Private windows | Storage, crypto, TTL and the chokepoint are done and tested; the **two-stage opt-in has not been exercised with a real private window**. |
-| M6 — Firefox | Builds and manifests exist; **not yet loaded in Firefox**. |
-| M7 — Polish | Not started. No installer, no tray, no review UI. |
+| M6 — Firefox | **Done.** Runs in Firefox, connects, captures. AMO lint clean: 0 errors, 0 warnings, 0 notices. |
+| M7 — Polish | **Tray, review window and logon task done.** No MSI/MSIX installer yet, and nothing is signed. |
 
-M0, M1, M2, M3 and half of M4/M5 are real. **A session survives a reboot end to end:
-applications relaunch into their old positions and browsers get their tabs back.** What
-is missing is the packaging and the interface around it - no installer, no tray, no
-review window - plus Firefox, which has never been loaded.
+M0-M3, M6 and most of M7 are real, plus half of M4/M5. **A session survives a reboot
+end to end on Chrome, Edge and Firefox**: applications relaunch into their old
+positions, browsers get their missing tabs back, and `--install` registers the logon
+task so it happens on its own. There is a tray icon and a review window to approve it
+with.
+
+What remains is distribution - an installer and code signing - and the deferred pieces
+listed below.
 
 ### Verified by running it, not just by tests
 
@@ -33,6 +37,8 @@ review window - plus Firefox, which has never been loaded.
   Notepad, each with the right tier, env-folded paths, and Store apps carrying the
   AUMID needed to relaunch them
 - Not one browser window stored a page title, with private windows open at the time
+- Firefox: extension loads, connects, and reconciles on the alarm
+- The review window renders the real session with per-app checkboxes and honest tiers
 - Closing Calculator and Notepad, then restoring: both relaunched through
   IApplicationActivationManager
 - Window placement round-trip: a window at 116,129 (689x489) was moved to 40,40
@@ -45,12 +51,12 @@ review window - plus Firefox, which has never been loaded.
 - No tray, no review window; `--status` is the only UI.
 - A `pre_restore` snapshot is taken on every restore, but nothing consumes it yet -
   there is no Undo action.
-- Restore is offered automatically; `restore_mode = ask` is stored and honoured only as
-  "off or not", because there is no review UI to ask with.
-- Application restore therefore requires `restore_mode = auto` explicitly, rather than
-  treating `ask` as consent. Launching a dozen applications unprompted is more
-  intrusive than adding tabs, and until there is a window to ask with, the honest
-  default is not to. `--restore-apps` does it on demand.
+- Browser tab restore is still offered whenever `restore_mode` is not `off`, without
+  going through the review window. Only application restore is gated on the review.
+- No installer. The agent runs from its build directory, and nothing is code-signed,
+  so SmartScreen will warn on another machine.
+- On the GNU toolchain the agent needs `WebView2Loader.dll` beside it (the build
+  places it there automatically). An MSVC build links it statically and needs no DLL.
 - Restore does not yet reopen documents (tier C is planned but unused), and window
   z-order and focus are not restored.
 - Firefox untested.

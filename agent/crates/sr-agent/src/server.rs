@@ -15,8 +15,10 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 pub struct Shared {
-    pub db: Mutex<Db>,
-    pub keys: KeyManager,
+    /// Shared with the UI thread, which must see the same database instance - two
+    /// connections to one SQLite file would give the tray a stale view.
+    pub db: Arc<Mutex<Db>>,
+    pub keys: Arc<KeyManager>,
     /// The snapshot captured at startup, and who has already been offered it.
     pub pending_restore: Mutex<PendingRestore>,
 }

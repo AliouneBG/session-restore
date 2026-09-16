@@ -1,0 +1,315 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Restore your session</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #1b1b1f;
+        --muted: #62626b;
+        --line: #e3e3e8;
+        --accent: #2f6fd0;
+        --warn-bg: #fff6e5;
+        --warn-line: #e8c98a;
+        --warn-fg: #6b4a05;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #1f1f23;
+          --fg: #eeeef2;
+          --muted: #9a9aa4;
+          --line: #35353c;
+          --accent: #6ea8fe;
+          --warn-bg: #2f2716;
+          --warn-line: #5c4a1f;
+          --warn-fg: #e8c98a;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 13.5px/1.5 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+      }
+      header {
+        padding: 18px 20px 12px;
+        border-bottom: 1px solid var(--line);
+        flex: none;
+      }
+      h1 { font-size: 15px; margin: 0 0 2px; font-weight: 600; }
+      .sub { color: var(--muted); font-size: 12.5px; }
+      main { overflow-y: auto; padding: 8px 20px 4px; flex: 1; }
+      footer {
+        flex: none;
+        padding: 12px 20px 16px;
+        border-top: 1px solid var(--line);
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .row {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        padding: 7px 2px;
+        border-bottom: 1px solid var(--line);
+      }
+      .row:last-child { border-bottom: none; }
+      .row label { flex: 1; cursor: pointer; display: flex; gap: 10px; align-items: baseline; }
+      .name { font-weight: 500; }
+      .detail { color: var(--muted); font-size: 12.5px; }
+      .tier { color: var(--muted); font-size: 12px; white-space: nowrap; }
+      .tier.warn { color: var(--warn-fg); }
+      input[type="checkbox"] { margin: 0; accent-color: var(--accent); }
+      input[disabled] + label { opacity: .55; cursor: default; }
+      h2 {
+        font-size: 11.5px;
+        text-transform: uppercase;
+        letter-spacing: .06em;
+        color: var(--muted);
+        margin: 16px 0 4px;
+        font-weight: 600;
+      }
+      details.tabs > summary {
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 12.5px;
+        padding: 2px 0 2px 26px;
+        list-style: none;
+      }
+      details.tabs > summary::-webkit-details-marker { display: none; }
+      details.tabs > summary::before { content: "▸ "; }
+      details.tabs[open] > summary::before { content: "▾ "; }
+      ul.tablist { margin: 2px 0 6px; padding: 0 0 0 40px; }
+      ul.tablist li {
+        list-style: none;
+        color: var(--muted);
+        font-size: 12.5px;
+        padding: 1px 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .private {
+        border: 1px solid var(--warn-line);
+        background: var(--warn-bg);
+        color: var(--warn-fg);
+        border-radius: 6px;
+        padding: 10px 12px;
+        margin: 14px 0 6px;
+      }
+      .private .head { display: flex; align-items: baseline; gap: 10px; }
+      .private .head .name { flex: 1; }
+      .private .note { font-size: 12px; margin-top: 6px; opacity: .85; }
+      button {
+        font: inherit;
+        padding: 6px 14px;
+        border-radius: 5px;
+        border: 1px solid var(--line);
+        background: transparent;
+        color: var(--fg);
+        cursor: pointer;
+      }
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+        font-weight: 500;
+      }
+      button.small { padding: 3px 9px; font-size: 12px; }
+      button:disabled { opacity: .5; cursor: default; }
+      .spacer { flex: 1; }
+      .linkish {
+        background: none;
+        border: none;
+        color: var(--muted);
+        text-decoration: underline;
+        padding: 0;
+        font-size: 12.5px;
+      }
+      .empty { color: var(--muted); padding: 24px 2px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Restore your session?</h1>
+      <div class="sub" id="subtitle">…</div>
+    </header>
+
+    <main id="main"><div class="empty">Loading…</div></main>
+
+    <footer>
+      <button class="primary" id="restore">Restore selected</button>
+      <button id="notnow">Not now</button>
+      <div class="spacer"></div>
+      <button class="linkish" id="never">Never ask again</button>
+    </footer>
+
+    <script>
+      const send = (msg) => window.ipc.postMessage(JSON.stringify(msg));
+      let data = null;
+      let privateRevealed = null;
+
+      const esc = (s) =>
+        String(s).replace(/[&<>"']/g, (c) =>
+          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+        );
+
+      function shortUrl(u) {
+        try {
+          const x = new URL(u);
+          return x.host + (x.pathname === "/" ? "" : x.pathname);
+        } catch {
+          return u;
+        }
+      }
+
+      function render() {
+        const m = document.getElementById("main");
+        if (!data) return;
+
+        const appCount = data.apps.length;
+        const tabCount = data.browser_windows.reduce((n, w) => n + w.tabs.length, 0);
+        document.getElementById("subtitle").textContent =
+          `Captured ${data.captured_label} — ${appCount} app${appCount === 1 ? "" : "s"}, ` +
+          `${tabCount} tab${tabCount === 1 ? "" : "s"}`;
+
+        let html = "";
+
+        if (data.apps.length) {
+          html += "<h2>Applications</h2>";
+          for (const a of data.apps) {
+            const id = "app-" + esc(a.app_key);
+            html += `<div class="row">
+              <input type="checkbox" id="${id}" data-app="${esc(a.app_key)}"
+                     ${a.restorable ? "checked" : "disabled"} />
+              <label for="${id}">
+                <span class="name">${esc(a.name)}</span>
+                <span class="detail">${a.windows} window${a.windows === 1 ? "" : "s"}</span>
+              </label>
+              <span class="tier ${a.restorable ? "" : "warn"}">${esc(a.tier_note)}</span>
+            </div>`;
+          }
+        }
+
+        if (data.browser_windows.length) {
+          html += "<h2>Browser windows</h2>";
+          for (const w of data.browser_windows) {
+            const id = "win-" + esc(w.window_id);
+            const label = w.browser.charAt(0).toUpperCase() + w.browser.slice(1);
+            html += `<div class="row">
+              <input type="checkbox" id="${id}" data-window="${esc(w.window_id)}" checked />
+              <label for="${id}">
+                <span class="name">${esc(label)}</span>
+                <span class="detail">${w.tabs.length} tab${w.tabs.length === 1 ? "" : "s"}</span>
+              </label>
+            </div>
+            <details class="tabs"><summary>show tabs</summary><ul class="tablist">
+              ${w.tabs.map((t) => `<li>${esc(t.title || shortUrl(t.url))}</li>`).join("")}
+            </ul></details>`;
+          }
+        }
+
+        // Private windows: collapsed, unchecked, and their URLs are not even present
+        // until the user asks. Someone screen-sharing after a reboot should not have
+        // these rendered by default.
+        if (data.private.available && data.private.tabs > 0) {
+          html += `<div class="private">
+            <div class="head">
+              <input type="checkbox" id="priv" />
+              <label for="priv" class="name">
+                ${data.private.windows} private window${data.private.windows === 1 ? "" : "s"}
+                (${data.private.tabs} tab${data.private.tabs === 1 ? "" : "s"})
+              </label>
+              <span class="tier">expires in ${data.private.expires_in_hours}h</span>
+              <button class="small" id="showpriv">Show</button>
+            </div>
+            <div id="privlist"></div>
+            <div class="note">
+              Stored encrypted on this computer, never uploaded, and deleted
+              automatically. Not shown until you ask.
+            </div>
+          </div>`;
+        }
+
+        if (!html) html = '<div class="empty">Nothing to restore from this session.</div>';
+        m.innerHTML = html;
+
+        const showBtn = document.getElementById("showpriv");
+        if (showBtn) showBtn.addEventListener("click", onShowPrivate);
+      }
+
+      function onShowPrivate() {
+        const btn = document.getElementById("showpriv");
+        if (privateRevealed) {
+          document.getElementById("privlist").innerHTML = "";
+          privateRevealed = null;
+          btn.textContent = "Show";
+          return;
+        }
+        btn.disabled = true;
+        send({ action: "reveal_private" });
+      }
+
+      window.srPrivateRevealed = (windows) => {
+        privateRevealed = windows;
+        const btn = document.getElementById("showpriv");
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = "Hide";
+        }
+        const list = document.getElementById("privlist");
+        if (!list) return;
+        list.innerHTML = windows
+          .map(
+            (w) =>
+              `<ul class="tablist">${w.tabs
+                .map((t) => `<li>${esc(t.title || shortUrl(t.url))}</li>`)
+                .join("")}</ul>`,
+          )
+          .join("");
+      };
+
+      window.srData = (payload) => {
+        data = payload;
+        render();
+      };
+
+      function choice(confirmed, neverAsk) {
+        const apps = [...document.querySelectorAll("input[data-app]:checked")].map(
+          (el) => el.dataset.app,
+        );
+        const windows = [...document.querySelectorAll("input[data-window]:checked")].map(
+          (el) => el.dataset.window,
+        );
+        const priv = document.getElementById("priv");
+        return {
+          action: "choose",
+          apps,
+          browser_windows: windows,
+          restore_private: !!(priv && priv.checked),
+          never_ask_again: !!neverAsk,
+          confirmed: !!confirmed,
+        };
+      }
+
+      document.getElementById("restore").addEventListener("click", () => {
+        send(choice(true, false));
+      });
+      document.getElementById("notnow").addEventListener("click", () => {
+        send(choice(false, false));
+      });
+      document.getElementById("never").addEventListener("click", () => {
+        send(choice(false, true));
+      });
+
+      send({ action: "ready" });
+    </script>
+  </body>
+</html>

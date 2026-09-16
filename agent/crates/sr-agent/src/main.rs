@@ -421,8 +421,10 @@ fn run() -> Result<()> {
     // than adding tabs to a browser the user just opened, and until there is a review
     // window to ask with, the honest default is not to do it. `ask` therefore behaves
     // as "not yet" here rather than silently meaning "yes".
+    let restore_mode = db.setting("restore_mode")?.unwrap_or_else(|| "ask".into());
+
     if let Some(snapshot_id) = pending {
-        let mode = db.setting("restore_mode")?.unwrap_or_else(|| "ask".into());
+        let mode = restore_mode.clone();
         if mode == "auto" {
             match restore_apps_at_startup(&db, snapshot_id) {
                 Ok((launched, placed)) => {
@@ -449,9 +451,11 @@ fn run() -> Result<()> {
         }
     }
 
+    let db = Arc::new(Mutex::new(db));
+    let keys = Arc::new(keys);
     let shared = Arc::new(Shared {
-        db: Mutex::new(db),
-        keys,
+        db: Arc::clone(&db),
+        keys: Arc::clone(&keys),
         pending_restore: Mutex::new(PendingRestore::new(pending)),
     });
 
@@ -498,7 +502,25 @@ fn run() -> Result<()> {
         }
     });
 
-    serve(shared)
+    // The pipe server has no thread affinity; the UI does, and on Windows the thread
+    // that owns windows must run the message pump. So the server moves to a
+    // background thread and the tray takes the main thread.
+    let server_shared = Arc::clone(&shared);
+    std::thread::spawn(move || {
+        if let Err(e) = serve(server_shared) {
+            tracing::error!(error = %e, "pipe server stopped");
+        }
+    });
+
+    // `ask` is the default, and now there is something to ask with.
+    let review_at_start = pending.is_some() && restore_mode == "ask";
+
+    sr_agent::ui::run_app(sr_agent::ui::UiContext {
+        db,
+        keys,
+        pending_snapshot: pending,
+        review_at_start,
+    })
 }
 
 /// Opens the database, or moves a corrupt one aside and starts fresh.
