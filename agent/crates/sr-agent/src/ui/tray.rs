@@ -12,6 +12,7 @@ use tray_icon::{TrayIcon, TrayIconBuilder};
 pub struct Tray {
     _icon: TrayIcon,
     pub restore_id: tray_icon::menu::MenuId,
+    pub settings_id: tray_icon::menu::MenuId,
     pub capture_now_id: tray_icon::menu::MenuId,
     pub pause_id: tray_icon::menu::MenuId,
     pub open_folder_id: tray_icon::menu::MenuId,
@@ -25,6 +26,7 @@ impl Tray {
 
         let restore = MenuItem::new("Restore last session…", true, None);
         let capture_now = MenuItem::new("Capture now", true, None);
+        let settings = MenuItem::new("Settings...", true, None);
         let pause = CheckMenuItem::new("Pause capture", true, !capture_enabled, None);
         let open_folder = MenuItem::new("Open data folder", true, None);
         let quit = MenuItem::new("Quit Session Restore", true, None);
@@ -32,6 +34,7 @@ impl Tray {
         menu.append(&restore)?;
         menu.append(&capture_now)?;
         menu.append(&PredefinedMenuItem::separator())?;
+        menu.append(&settings)?;
         menu.append(&pause)?;
         menu.append(&open_folder)?;
         menu.append(&PredefinedMenuItem::separator())?;
@@ -45,6 +48,7 @@ impl Tray {
 
         Ok(Tray {
             restore_id: restore.id().clone(),
+            settings_id: settings.id().clone(),
             capture_now_id: capture_now.id().clone(),
             pause_id: pause.id().clone(),
             open_folder_id: open_folder.id().clone(),

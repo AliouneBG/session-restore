@@ -300,6 +300,50 @@ fn write_one(writer: &Arc<Mutex<sr_ipc::PipeConnection>>, env: &Envelope) -> Res
     Ok(())
 }
 
+/// The browsers whose extensions are connected to this agent right now.
+///
+/// A registered native messaging host proves nothing about whether the extension is
+/// actually loaded and running, which is exactly what onboarding needs to know.
+pub fn connected_browsers(shared: &Arc<Shared>) -> Vec<String> {
+    let conns = shared.connections.lock().unwrap();
+    let mut out: Vec<String> = conns.iter().map(|c| c.browser.clone()).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Tells every connected browser that the settings changed.
+///
+/// Without this a setting toggled in the settings window reached the extension only
+/// when its service worker next restarted, which for a browser sitting open could be
+/// hours. `capture_private` is the one that matters: it is what tells the extension to
+/// drop private events at the source, and a switch labelled "remember private windows"
+/// that does not start remembering them until tomorrow is a broken switch.
+pub fn push_settings(shared: &Arc<Shared>) {
+    let body = {
+        let db = shared.db.lock().unwrap();
+        serde_json::json!({
+            "capture_enabled": db.setting_bool("capture_enabled", true),
+            "capture_private": db.setting_bool("capture_private_windows", false),
+            "reconcile_interval_s": db.setting_i64("reconcile_interval_seconds", 60),
+        })
+    };
+    let env = Envelope::new("settings_changed", body);
+
+    let targets: Vec<(String, Arc<Mutex<sr_ipc::PipeConnection>>)> = {
+        let conns = shared.connections.lock().unwrap();
+        conns
+            .iter()
+            .map(|c| (c.browser.clone(), Arc::clone(&c.writer)))
+            .collect()
+    };
+    for (browser, writer) in targets {
+        if let Err(e) = write_one(&writer, &env) {
+            tracing::warn!(browser, error = %e, "could not push the new settings");
+        }
+    }
+}
+
 /// Sends the restore offer to browsers that connected while the review was open.
 ///
 /// Called once the user has answered (or dismissed) the review window. Browsers that
@@ -379,6 +423,26 @@ fn dispatch(env: &Envelope, shared: &Shared, profile_override: Option<&str>) -> 
                 incognito_access,
                 capture_private,
                 "extension connected"
+            );
+
+            // Recorded so the settings and onboarding windows can show the real state
+            // of each browser. Whether the browser granted private-window access is
+            // knowable only here: the extension is the only thing that can see it.
+            let _ = db.conn.execute(
+                "INSERT INTO browser_status (browser, profile_key, ext_version,
+                                             incognito_access, last_seen)
+                 VALUES (?1,?2,?3,?4,?5)
+                 ON CONFLICT(browser, profile_key) DO UPDATE SET
+                   ext_version = excluded.ext_version,
+                   incognito_access = excluded.incognito_access,
+                   last_seen = excluded.last_seen",
+                rusqlite::params![
+                    browser,
+                    profile,
+                    env.src.as_ref().map(|s| s.ext_version.clone()),
+                    incognito_access,
+                    sr_proto::now_millis(),
+                ],
             );
 
             let ack = HelloAckBody {

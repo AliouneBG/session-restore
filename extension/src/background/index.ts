@@ -98,6 +98,18 @@ const port = new AgentPort({
   onStatusChange: (connected, reason) => {
     chrome.action?.setBadgeText({ text: connected ? "" : "!" });
     if (!connected && reason) console.warn("[session-restore]", reason);
+
+    // Re-introduce ourselves on every reconnect, not only on worker start.
+    //
+    // hello is the only message carrying incognito_access and the extension version,
+    // and the agent shows both in its settings window. Sending it once per service
+    // worker meant a browser left open for a day never told the agent anything again,
+    // so the agent's view of it aged out while the connection stayed healthy.
+    if (connected) {
+      void sayHello().catch(() => {
+        // The port schedules its own retry; the reconcile alarm keeps us correct.
+      });
+    }
   },
 });
 

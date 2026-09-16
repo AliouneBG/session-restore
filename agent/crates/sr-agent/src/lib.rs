@@ -3,9 +3,12 @@
 //! Library half so integration tests can exercise the storage, ingest, and server
 //! layers directly. See docs/08-agent.md for the module map.
 
+pub mod browsers;
 pub mod ingest;
+pub mod logging;
 pub mod restore;
 pub mod server;
+pub mod single_instance;
 pub mod shutdown;
 pub mod setup;
 pub mod store;

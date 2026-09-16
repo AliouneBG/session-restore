@@ -8,7 +8,9 @@
 //! One loop hosts both the tray and the review window, because two event loops on one
 //! thread is not a thing Windows will do.
 
+pub mod onboarding;
 pub mod review;
+pub mod settings;
 pub mod tray;
 
 use crate::store::db::Db;
@@ -26,11 +28,21 @@ pub struct UiContext {
     pub pending_snapshot: Option<i64>,
     /// Whether to open the review window as soon as the agent starts.
     pub review_at_start: bool,
+    /// Whether this is a first run and the welcome flow should be shown.
+    pub onboard_at_start: bool,
+    pub data_dir: std::path::PathBuf,
 }
 
 #[derive(Debug)]
 enum UserEvent {
+    /// Another launch of the agent asked for the interface to be shown.
+    ShowUi,
+    /// A message from the review window.
     Ipc(String),
+    /// A message from the settings window.
+    SettingsIpc(String),
+    /// A message from the first-run flow.
+    OnboardingIpc(String),
     Menu(tray_icon::menu::MenuId),
 }
 
@@ -50,6 +62,16 @@ pub fn run_app(ctx: UiContext) -> Result<()> {
         tray_icon::menu::MenuEvent::set_event_handler(Some(move |e: tray_icon::menu::MenuEvent| {
             let _ = proxy.send_event(UserEvent::Menu(e.id));
         }));
+    }
+
+    // A second launch is how someone opens an app with no main window.
+    {
+        let proxy = proxy.clone();
+        if let Err(e) = crate::single_instance::listen_for_show_ui(move || {
+            let _ = proxy.send_event(UserEvent::ShowUi);
+        }) {
+            tracing::warn!(error = %e, "not listening for further launches");
+        }
     }
 
     let capture_enabled = {
@@ -89,18 +111,39 @@ pub fn run_app(ctx: UiContext) -> Result<()> {
     // Held across iterations. Dropping the pair closes the window.
     let mut review_window: Option<(tao::window::Window, wry::WebView)> = None;
     let mut review_snapshot: Option<i64> = None;
+    let mut settings_window: Option<(tao::window::Window, wry::WebView)> = None;
+    let mut onboarding_window: Option<(tao::window::Window, wry::WebView)> = None;
     let mut open_at_start = ctx.review_at_start;
+    let mut onboard_at_start = ctx.onboard_at_start;
 
     let db = ctx.db;
     let keys = ctx.keys;
     let pending = ctx.pending_snapshot;
     let shared = ctx.shared;
+    let data_dir = ctx.data_dir;
 
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
 
         match event {
             Event::NewEvents(StartCause::Init) => {
+                if onboard_at_start {
+                    onboard_at_start = false;
+                    // Ahead of the review window on purpose. A first run usually has
+                    // nothing worth restoring, and two windows at once is not a welcome.
+                    open_at_start = false;
+                    match open_window(
+                        target,
+                        &proxy,
+                        "Welcome to Session Restore",
+                        onboarding::ONBOARDING_HTML,
+                        (620.0, 560.0),
+                        UserEvent::OnboardingIpc,
+                    ) {
+                        Ok(w) => onboarding_window = Some(w),
+                        Err(e) => tracing::error!(error = %e, "could not open the welcome window"),
+                    }
+                }
                 if open_at_start {
                     open_at_start = false;
                     if let Some(id) = pending {
@@ -134,6 +177,21 @@ pub fn run_app(ctx: UiContext) -> Result<()> {
                         },
                         None => tracing::info!("nothing to restore"),
                     }
+                } else if id == tray.settings_id {
+                    if settings_window.is_some() {
+                        return;
+                    }
+                    match open_window(
+                        target,
+                        &proxy,
+                        "Session Restore settings",
+                        settings::SETTINGS_HTML,
+                        (560.0, 640.0),
+                        UserEvent::SettingsIpc,
+                    ) {
+                        Ok(w) => settings_window = Some(w),
+                        Err(e) => tracing::error!(error = %e, "could not open settings"),
+                    }
                 } else if id == tray.capture_now_id {
                     let db = db.lock().unwrap();
                     match crate::watcher::capture_into_live(&db) {
@@ -152,6 +210,114 @@ pub fn run_app(ctx: UiContext) -> Result<()> {
                     }
                 } else if id == tray.quit_id {
                     *control_flow = ControlFlow::Exit;
+                }
+            }
+
+            Event::UserEvent(UserEvent::ShowUi) => {
+                // Settings is the window that answers "I clicked the app": it says what
+                // is being watched and what the settings are. Focus an open one rather
+                // than opening a second.
+                if let Some((window, _)) = settings_window.as_ref() {
+                    window.set_focus();
+                    return;
+                }
+                match open_window(
+                    target,
+                    &proxy,
+                    "Session Restore settings",
+                    settings::SETTINGS_HTML,
+                    (560.0, 640.0),
+                    UserEvent::SettingsIpc,
+                ) {
+                    Ok(w) => settings_window = Some(w),
+                    Err(e) => tracing::error!(error = %e, "could not open settings"),
+                }
+            }
+
+            Event::UserEvent(UserEvent::SettingsIpc(body)) => {
+                let Some((_, webview)) = settings_window.as_ref() else {
+                    return;
+                };
+                let Ok(action) = serde_json::from_str::<settings::SettingsAction>(&body) else {
+                    return;
+                };
+
+                if matches!(action, settings::SettingsAction::Close) {
+                    settings_window = None;
+                    return;
+                }
+
+                let refresh = {
+                    let db = db.lock().unwrap();
+                    match settings::apply(&db, &action) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "settings change refused");
+                            true
+                        }
+                    }
+                };
+
+                // The extensions are told immediately. `capture_private` is what makes
+                // them drop private events at the source, so a browser that has not
+                // heard about the change is still enforcing the old answer.
+                if !matches!(action, settings::SettingsAction::Ready) {
+                    crate::server::push_settings(&shared);
+                }
+
+                // Re-render on anything that changes what the other controls should
+                // say, and on the initial `ready`. A stale toggle is worse than a slow
+                // one, because it claims something that is not true.
+                if refresh || matches!(action, settings::SettingsAction::Ready) {
+                    let connected = crate::server::connected_browsers(&shared);
+                    let payload = {
+                        let db = db.lock().unwrap();
+                        settings::collect(&db, &connected, &data_dir)
+                    };
+                    if let Ok(p) = payload {
+                        if let Ok(json) = serde_json::to_string(&p) {
+                            let _ = webview.evaluate_script(&format!("window.srSettings({json})"));
+                        }
+                    }
+                }
+            }
+
+            Event::UserEvent(UserEvent::OnboardingIpc(body)) => {
+                let Some((_, webview)) = onboarding_window.as_ref() else {
+                    return;
+                };
+                let Ok(action) = serde_json::from_str::<onboarding::OnboardingAction>(&body) else {
+                    return;
+                };
+
+                {
+                    let db = db.lock().unwrap();
+                    if let Err(e) = onboarding::apply(&db, &action) {
+                        tracing::warn!(error = %e, "onboarding action failed");
+                    }
+                }
+                if matches!(action, onboarding::OnboardingAction::SetCapturePrivate { .. }) {
+                    crate::server::push_settings(&shared);
+                }
+
+                if matches!(action, onboarding::OnboardingAction::Finish) {
+                    onboarding_window = None;
+                    tracing::info!("first run completed");
+                    return;
+                }
+
+                // Every message re-sends the state, which is what makes the browser
+                // step tick itself off: the page polls, and a browser that connected a
+                // second ago shows up here.
+                let connected = crate::server::connected_browsers(&shared);
+                let payload = {
+                    let db = db.lock().unwrap();
+                    onboarding::collect(&db, &connected)
+                };
+                if let Ok(p) = payload {
+                    if let Ok(json) = serde_json::to_string(&p) {
+                        let _ = webview.evaluate_script(&format!("window.srOnboarding({json})"));
+                    }
                 }
             }
 
@@ -210,22 +376,43 @@ pub fn run_app(ctx: UiContext) -> Result<()> {
 
             Event::WindowEvent {
                 event: tao::event::WindowEvent::CloseRequested,
+                window_id,
                 ..
             } => {
-                // Dismissal decides nothing. Treating a closed window as consent would
-                // restore a session the user never agreed to.
-                //
-                // It does have to release browsers waiting on an answer, though. They
-                // were deliberately not offered anything while the window was open, and
-                // without this their offer would never arrive at all.
-                {
-                    let mut pending = shared.pending_restore.lock().unwrap();
-                    pending.review_dismissed();
-                }
-                crate::server::offer_to_connected(&shared);
+                // Which window. Before there was only one and this arm could assume it;
+                // with three, assuming would mean closing settings silently declined a
+                // restore the user had not been asked about yet.
+                let is = |w: &Option<(tao::window::Window, wry::WebView)>| {
+                    w.as_ref().map(|(win, _)| win.id() == window_id).unwrap_or(false)
+                };
 
-                review_window = None;
-                review_snapshot = None;
+                if is(&settings_window) {
+                    settings_window = None;
+                } else if is(&onboarding_window) {
+                    // Closing the welcome flow counts as finishing it. Showing it again
+                    // at the next sign-in would be the most irritating thing this
+                    // application could do.
+                    {
+                        let db = db.lock().unwrap();
+                        let _ = onboarding::mark_done(&db);
+                    }
+                    onboarding_window = None;
+                } else if is(&review_window) {
+                    // Dismissal decides nothing. Treating a closed window as consent
+                    // would restore a session the user never agreed to.
+                    //
+                    // It does have to release browsers waiting on an answer, though.
+                    // They were deliberately not offered anything while the window was
+                    // open, and without this their offer would never arrive at all.
+                    {
+                        let mut pending = shared.pending_restore.lock().unwrap();
+                        pending.review_dismissed();
+                    }
+                    crate::server::offer_to_connected(&shared);
+
+                    review_window = None;
+                    review_snapshot = None;
+                }
             }
 
             _ => {}
@@ -260,6 +447,43 @@ fn open_review(
         .with_html(review::REVIEW_HTML)
         .with_ipc_handler(move |req| {
             let _ = proxy.send_event(UserEvent::Ipc(req.body().to_string()));
+        })
+        .build(&window)?;
+
+    Ok((window, webview))
+}
+
+/// Opens a WebView2 window on a page, routing its messages through `wrap`.
+///
+/// The review window predates this and keeps its own opener because it is the one
+/// window that is always on top: it appears unprompted at sign-in and has to be seen.
+/// Settings and the welcome flow are opened by the user, so stealing the foreground
+/// from whatever they were doing would be rude.
+#[cfg(windows)]
+fn open_window(
+    target: &tao::event_loop::EventLoopWindowTarget<UserEvent>,
+    proxy: &tao::event_loop::EventLoopProxy<UserEvent>,
+    title: &str,
+    html: &str,
+    size: (f64, f64),
+    wrap: fn(String) -> UserEvent,
+) -> Result<(tao::window::Window, wry::WebView)> {
+    use tao::window::WindowBuilder;
+    use wry::WebViewBuilder;
+
+    let window = WindowBuilder::new()
+        .with_title(title)
+        .with_inner_size(tao::dpi::LogicalSize::new(size.0, size.1))
+        .with_min_inner_size(tao::dpi::LogicalSize::new(460.0, 400.0))
+        .build(target)?;
+
+    apply_titlebar_theme(&window);
+
+    let proxy = proxy.clone();
+    let webview = WebViewBuilder::new()
+        .with_html(html)
+        .with_ipc_handler(move |req| {
+            let _ = proxy.send_event(wrap(req.body().to_string()));
         })
         .build(&window)?;
 

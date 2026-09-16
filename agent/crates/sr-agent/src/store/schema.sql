@@ -183,6 +183,22 @@ CREATE TABLE IF NOT EXISTS restore_items (
   FOREIGN KEY (run_id) REFERENCES restore_runs(id) ON DELETE CASCADE
 );
 
+-- What each browser told us about itself, the last time it connected.
+--
+-- Deliberately not snapshot-scoped: this describes the *installation*, not a session,
+-- so it is never copied into a snapshot. It exists so the settings and onboarding
+-- windows can answer "is the extension actually working in Edge?" without guessing.
+-- incognito_access in particular cannot be read from anywhere else: only the extension
+-- can see whether the browser granted it, and it says so in every hello.
+CREATE TABLE IF NOT EXISTS browser_status (
+  browser          TEXT NOT NULL,
+  profile_key      TEXT NOT NULL,
+  ext_version      TEXT,
+  incognito_access INTEGER NOT NULL DEFAULT 0,
+  last_seen        INTEGER NOT NULL,
+  PRIMARY KEY (browser, profile_key)
+);
+
 -- Debugging and recovery aid, not the primary store. Private events are never
 -- journaled in plaintext; they appear as {"private":true} with no URL.
 CREATE TABLE IF NOT EXISTS journal (

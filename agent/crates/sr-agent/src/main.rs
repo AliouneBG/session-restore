@@ -3,6 +3,14 @@
 //! A per-user process started at logon by a Scheduled Task, not a Windows Service.
 //! See ADR-0001 for why that distinction is load-bearing.
 
+// Built for the `windows` subsystem, not `console`.
+//
+// Launching from the Start Menu used to open a console window and fill it with
+// `INFO reconcile tabs=4`, which is a log, not a user interface. The command line is
+// unaffected: `wants_terminal` spots a typed command and borrows the parent console,
+// so `--status` still prints where it always did.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use anyhow::{Context, Result};
 use sr_agent::ingest::sweep_expired_private;
 use sr_agent::server::{serve, PendingRestore, Shared};
@@ -48,6 +56,12 @@ ENVIRONMENT:
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Before anything prints. A windows-subsystem process has no console of its own,
+    // so without this every println below would go nowhere.
+    if sr_agent::logging::wants_terminal(&args) {
+        sr_agent::logging::attach_parent_console();
+    }
 
     let result = if args.iter().any(|a| a == "--help" || a == "-h") {
         print!("{USAGE}");
@@ -516,10 +530,26 @@ fn restore_apps_at_startup(db: &Db, snapshot_id: i64) -> Result<(usize, usize)> 
 }
 
 fn run() -> Result<()> {
-    init_logging();
+    let dir = data_dir()?;
+    // File only: this is the background app and it has no terminal to write to.
+    sr_agent::logging::init(&dir, false);
+
+    // One agent per logon session. Launching it again is how a person opens an app
+    // that has no main window, so the second process asks the first to show its
+    // settings and leaves rather than starting a rival tray icon and capture loop.
+    let _instance = match sr_agent::single_instance::acquire()? {
+        Some(lock) => lock,
+        None => {
+            tracing::info!("already running; asking the existing agent to show itself");
+            if let Err(e) = sr_agent::single_instance::signal_show_ui() {
+                tracing::warn!(error = %e, "could not reach the running agent");
+            }
+            return Ok(());
+        }
+    };
+
     tracing::info!(version = AGENT_VERSION, "starting");
 
-    let dir = data_dir()?;
     let db_path = dir.join("sessions.db");
 
     let db = open_or_recover(&db_path)?;
@@ -678,12 +708,21 @@ fn run() -> Result<()> {
     // `ask` is the default, and now there is something to ask with.
     let review_at_start = pending.is_some() && restore_mode == "ask";
 
+    // First run. Checked here rather than in the UI thread so the decision is made
+    // once, from the same database handle everything else uses.
+    let onboard_at_start = {
+        let db = db.lock().unwrap();
+        sr_agent::ui::onboarding::should_show(&db)
+    };
+
     sr_agent::ui::run_app(sr_agent::ui::UiContext {
         db,
         keys,
         shared: Arc::clone(&shared),
         pending_snapshot: pending,
         review_at_start,
+        onboard_at_start,
+        data_dir: dir.clone(),
     })
 }
 
@@ -705,10 +744,3 @@ fn open_or_recover(path: &std::path::Path) -> Result<Db> {
     }
 }
 
-fn init_logging() {
-    use tracing_subscriber::{fmt, EnvFilter};
-    let filter = EnvFilter::try_from_env("SR_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
-    // Logs must never contain URLs, window titles, or command lines at default level
-    // (docs/06-privacy-security.md). The ingest path logs counts and key hashes only.
-    fmt().with_env_filter(filter).with_target(false).init();
-}
