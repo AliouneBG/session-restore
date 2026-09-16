@@ -73,6 +73,28 @@ impl Harness {
             .unwrap()
     }
 
+    fn has_tab_url(&self, url: &str) -> bool {
+        let n: i64 = self
+            .shared
+            .db
+            .lock()
+            .unwrap()
+            .conn
+            .query_row("SELECT COUNT(*) FROM tabs WHERE url = ?1", [url], |r| r.get(0))
+            .unwrap();
+        n > 0
+    }
+
+    fn window_count(&self) -> i64 {
+        self.shared
+            .db
+            .lock()
+            .unwrap()
+            .conn
+            .query_row("SELECT COUNT(*) FROM browser_windows", [], |r| r.get(0))
+            .unwrap()
+    }
+
     fn private_count(&self) -> i64 {
         self.shared
             .db
@@ -432,6 +454,84 @@ fn a_client_can_read_and_write_concurrently() {
         .recv_timeout(Duration::from_secs(10))
         .expect("deadlocked: the reply never arrived while a read was pending");
     assert!(len > 0, "expected a hello_ack frame, got an empty read");
+}
+
+fn state_msg(id: &str, browser: &str, windows: serde_json::Value, tabs: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "v": 1, "id": id, "type": "full_state", "ts": 0,
+        "src": { "browser": browser, "profile_key": "default", "ext_version": "0.1.0" },
+        "body": { "windows": windows, "tabs": tabs, "groups": [] }
+    })
+}
+
+#[test]
+fn a_browser_restart_does_not_leave_a_phantom_window() {
+    // Window ids are assigned fresh on every browser start, so a restart reports an
+    // entirely new set. Reaping scoped to "windows the payload mentioned" could never
+    // catch the old ones, and each restart leaked one phantom window forever.
+    let h = Harness::start();
+    let mut c = h.connect();
+    send(&mut c, hello());
+    let _ = recv(&mut c);
+
+    send(&mut c, state_msg("r1", "chrome",
+        serde_json::json!([{ "op": "upsert", "window_id": "w-old" }]),
+        serde_json::json!([{ "op": "upsert", "tab_key": "w-old:t1", "window_id": "w-old",
+                             "index": 0, "url": "https://before-restart.test/" }])));
+    for _ in 0..40 {
+        if h.tab_count() == 1 { break; }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(h.tab_count(), 1);
+
+    // Browser restarts: brand new window id, nothing in common with the old one.
+    send(&mut c, state_msg("r2", "chrome",
+        serde_json::json!([{ "op": "upsert", "window_id": "w-new" }]),
+        serde_json::json!([{ "op": "upsert", "tab_key": "w-new:t1", "window_id": "w-new",
+                             "index": 0, "url": "https://after-restart.test/" }])));
+    // Poll on the expected *content*: counts alone were already satisfied by the
+    // pre-restart state, so waiting on them raced past the message under test.
+    for _ in 0..60 {
+        if h.has_tab_url("https://after-restart.test/") && h.tab_count() == 1 { break; }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    assert_eq!(h.window_count(), 1, "the pre-restart window was never reaped");
+    assert_eq!(h.tab_count(), 1, "the pre-restart tab was never reaped");
+    let url: String = h.shared.db.lock().unwrap().conn
+        .query_row("SELECT url FROM tabs", [], |r| r.get(0)).unwrap();
+    assert_eq!(url, "https://after-restart.test/");
+}
+
+#[test]
+fn one_browser_reconcile_does_not_reap_another_browsers_tabs() {
+    // The reason reaping is scoped at all: each browser is authoritative only for
+    // itself. A Chrome reconcile must not delete what Firefox reported.
+    let h = Harness::start();
+    let mut c = h.connect();
+    send(&mut c, hello());
+    let _ = recv(&mut c);
+
+    send(&mut c, state_msg("f1", "firefox",
+        serde_json::json!([{ "op": "upsert", "window_id": "ff-w1" }]),
+        serde_json::json!([{ "op": "upsert", "tab_key": "ff-w1:t1", "window_id": "ff-w1",
+                             "index": 0, "url": "https://firefox-only.test/" }])));
+    for _ in 0..40 {
+        if h.tab_count() == 1 { break; }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Chrome reconciles with a completely different window set.
+    send(&mut c, state_msg("c1", "chrome",
+        serde_json::json!([{ "op": "upsert", "window_id": "ch-w1" }]),
+        serde_json::json!([{ "op": "upsert", "tab_key": "ch-w1:t1", "window_id": "ch-w1",
+                             "index": 0, "url": "https://chrome-only.test/" }])));
+    for _ in 0..40 {
+        if h.tab_count() == 2 { break; }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    assert_eq!(h.tab_count(), 2, "a reconcile from one browser reaped another's tabs");
 }
 
 #[test]

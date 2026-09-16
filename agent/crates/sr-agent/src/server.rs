@@ -113,6 +113,11 @@ fn dispatch(env: &Envelope, shared: &Shared) -> Result<Option<Envelope>> {
         .as_ref()
         .map(|s| s.browser.as_str())
         .unwrap_or("unknown");
+    let profile = env
+        .src
+        .as_ref()
+        .map(|s| s.profile_key.as_str())
+        .unwrap_or("default");
 
     // Message kind and counts only - never URLs or titles (docs/06).
     tracing::debug!(kind = %env.kind, browser, "message received");
@@ -153,7 +158,7 @@ fn dispatch(env: &Envelope, shared: &Shared) -> Result<Option<Envelope>> {
                 windows = body.windows.len(),
                 "tab_delta"
             );
-            apply_state(&body, shared, false, browser)?;
+            apply_state(&body, shared, false, browser, profile)?;
             Ok(None)
         }
 
@@ -165,7 +170,7 @@ fn dispatch(env: &Envelope, shared: &Shared) -> Result<Option<Envelope>> {
                 browser,
                 "reconcile"
             );
-            apply_state(&body, shared, true, browser)?;
+            apply_state(&body, shared, true, browser, profile)?;
             Ok(None)
         }
 
@@ -188,7 +193,13 @@ fn dispatch(env: &Envelope, shared: &Shared) -> Result<Option<Envelope>> {
 /// reported that is absent from the payload is deleted. That is what heals a service
 /// worker eviction that swallowed `tabs.onRemoved` - without it, closed tabs would
 /// linger forever (docs/01-architecture.md).
-fn apply_state(body: &StateBody, shared: &Shared, authoritative: bool, browser: &str) -> Result<()> {
+fn apply_state(
+    body: &StateBody,
+    shared: &Shared,
+    authoritative: bool,
+    browser: &str,
+    profile: &str,
+) -> Result<()> {
     let db = shared.db.lock().unwrap();
     let ctx = IngestCtx::live(&db, &shared.keys);
 
@@ -213,7 +224,7 @@ fn apply_state(body: &StateBody, shared: &Shared, authoritative: bool, browser: 
                         LIVE,
                         w.window_id,
                         browser,
-                        "default",
+                        profile,
                         w.private,
                         w.state.map(|s| format!("{s:?}").to_lowercase()),
                         w.x,
@@ -263,14 +274,22 @@ fn apply_state(body: &StateBody, shared: &Shared, authoritative: bool, browser: 
     }
 
     if authoritative {
-        reap_missing(&db, body)?;
+        reap_missing_for_browser(&db, body, browser, profile)?;
     }
 
     Ok(())
 }
 
 /// Deletes stored tabs and windows the authoritative payload did not mention.
-fn reap_missing(db: &Db, body: &StateBody) -> Result<()> {
+///
+/// Scoped by **browser and profile**, not by window. Window ids are assigned fresh
+/// every time a browser starts, so a restart produces an entirely new set of them and
+/// the previous session's windows would otherwise linger forever - one phantom window
+/// per browser restart, accumulating without limit.
+///
+/// Scoping to the reporting browser is what keeps Chrome's reconcile from deleting
+/// Firefox's rows: each browser is authoritative only for itself.
+fn reap_missing_for_browser(db: &Db, body: &StateBody, browser: &str, profile: &str) -> Result<()> {
     let live_windows: HashSet<&str> = body
         .windows
         .iter()
@@ -284,43 +303,56 @@ fn reap_missing(db: &Db, body: &StateBody) -> Result<()> {
         .map(|t| t.tab_key.as_str())
         .collect();
 
-    // Only reap within windows the payload covered. A full_state from Chrome must not
-    // delete Firefox's rows - each browser is authoritative only for itself.
-    let mut stmt = db
-        .conn
-        .prepare("SELECT tab_key, browser_window_id FROM tabs WHERE snapshot_id = ?1")?;
-    let stored: Vec<(String, String)> = stmt
-        .query_map([LIVE], |r| Ok((r.get(0)?, r.get(1)?)))?
+    // Every window this browser/profile currently has on record.
+    let mut stmt = db.conn.prepare(
+        "SELECT browser_window_id FROM browser_windows
+         WHERE snapshot_id = ?1 AND browser = ?2 AND profile_key = ?3",
+    )?;
+    let owned: Vec<String> = stmt
+        .query_map(rusqlite::params![LIVE, browser, profile], |r| r.get(0))?
         .filter_map(Result::ok)
         .collect();
     drop(stmt);
 
-    for (tab_key, window_id) in stored {
-        if live_windows.contains(window_id.as_str()) && !live_tabs.contains(tab_key.as_str()) {
+    for window_id in &owned {
+        if live_windows.contains(window_id.as_str()) {
+            // Window still exists: drop only the tabs it no longer reports.
+            for table in ["tabs", "tabs_private"] {
+                let sql = format!(
+                    "SELECT tab_key FROM {table} WHERE snapshot_id = ?1 AND browser_window_id = ?2"
+                );
+                let mut s = db.conn.prepare(&sql)?;
+                let keys: Vec<String> = s
+                    .query_map(rusqlite::params![LIVE, window_id], |r| r.get(0))?
+                    .filter_map(Result::ok)
+                    .collect();
+                drop(s);
+                for k in keys {
+                    if !live_tabs.contains(k.as_str()) {
+                        db.conn.execute(
+                            &format!("DELETE FROM {table} WHERE snapshot_id = ?1 AND tab_key = ?2"),
+                            rusqlite::params![LIVE, k],
+                        )?;
+                    }
+                }
+            }
+        } else {
+            // Window is gone. Take its tabs and groups with it.
+            for table in ["tabs", "tabs_private", "tab_groups"] {
+                db.conn.execute(
+                    &format!(
+                        "DELETE FROM {table} WHERE snapshot_id = ?1 AND browser_window_id = ?2"
+                    ),
+                    rusqlite::params![LIVE, window_id],
+                )?;
+            }
             db.conn.execute(
-                "DELETE FROM tabs WHERE snapshot_id = ?1 AND tab_key = ?2",
-                rusqlite::params![LIVE, tab_key],
-            )?;
-        }
-    }
-
-    let mut stmt = db
-        .conn
-        .prepare("SELECT tab_key, browser_window_id FROM tabs_private WHERE snapshot_id = ?1")?;
-    let stored_private: Vec<(String, String)> = stmt
-        .query_map([LIVE], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .filter_map(Result::ok)
-        .collect();
-    drop(stmt);
-
-    for (tab_key, window_id) in stored_private {
-        if live_windows.contains(window_id.as_str()) && !live_tabs.contains(tab_key.as_str()) {
-            db.conn.execute(
-                "DELETE FROM tabs_private WHERE snapshot_id = ?1 AND tab_key = ?2",
-                rusqlite::params![LIVE, tab_key],
+                "DELETE FROM browser_windows WHERE snapshot_id = ?1 AND browser_window_id = ?2",
+                rusqlite::params![LIVE, window_id],
             )?;
         }
     }
 
     Ok(())
 }
+

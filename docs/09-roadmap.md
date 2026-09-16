@@ -1,5 +1,36 @@
 # 09 — Roadmap
 
+## Status (2026-09-16)
+
+| Milestone | State |
+|---|---|
+| M0 — Walking skeleton | **Done.** Verified against real Edge end to end. |
+| M1 — Capture, tabs, T1 reconcile | **Done** for Chrome/Edge. Live tabs land in SQLite with title, order, active flag, pinned state, and window geometry. |
+| M2 — Apps and windows | Not started. No `EnumWindows` watcher yet. |
+| M3 — Restore | Planner and executor written and unit-tested; **never run against a browser**. |
+| M4 — T0 deltas / T2 shutdown | T0 event deltas done. T2 shutdown hook not written. |
+| M5 — Private windows | Storage, crypto, TTL and the chokepoint are done and tested; the **two-stage opt-in has not been exercised with a real private window**. |
+| M6 — Firefox | Builds and manifests exist; **not yet loaded in Firefox**. |
+| M7 — Polish | Not started. No installer, no tray, no review UI. |
+
+Roughly M0, M1, and half of M4/M5 are real. The honest summary is that **capture works
+and restore is unproven**.
+
+### Verified by running it, not just by tests
+
+- Real Edge -> extension -> relay -> agent -> SQLite, with correct titles and ordering
+- Closing a tab removes it from the store within seconds
+- Two consecutive browser restarts leave exactly one window, no phantoms
+- A known private URL never appears in any byte of any file the agent writes
+
+### Known gaps
+
+- `profile_key` is hardcoded to `"default"`, so two profiles of the same browser merge.
+  Needs the command-line machinery from M2.
+- No tray, no review window; `--status` is the only UI.
+- Restore has no `pre_restore` snapshot or undo yet.
+- Firefox untested.
+
 ## Build order
 
 The sequence matters. Each milestone is independently useful and de-risks the next.
