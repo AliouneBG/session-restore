@@ -1,17 +1,17 @@
-# 09 — Roadmap
+# 09 - Roadmap
 
 ## Status (2026-09-16)
 
 | Milestone | State |
 |---|---|
-| M0 — Walking skeleton | **Done.** Verified against real Edge end to end. |
-| M1 — Capture, tabs, T1 reconcile | **Done** for Chrome/Edge. Live tabs land in SQLite with title, order, active flag, pinned state, and window geometry. |
-| M2 — Apps and windows | **Done.** Apps, windows, geometry, displays, tiers and redacted command lines land in SQLite. |
-| M3 — Restore | **Done.** Browsers get their missing tabs back; applications are relaunched by tier and their windows placed, including across a changed monitor layout or DPI. The review window gates both halves, per application, per browser window and per tab. |
-| M4 — T0 deltas / T2 shutdown | **Done.** Event deltas plus a `WM_QUERYENDSESSION` flush bounded at 2s. |
-| M5 — Private windows | **Done and verified with real private windows in Chrome, Edge and Firefox.** |
-| M6 — Firefox | **Done.** Runs in Firefox, connects, captures. AMO lint clean: 0 errors, 0 warnings, 0 notices. |
-| M7 — Polish | **Tray, review window and logon task done.** No MSI/MSIX installer yet, and nothing is signed. |
+| M0 - Walking skeleton | **Done.** Verified against real Edge end to end. |
+| M1 - Capture, tabs, T1 reconcile | **Done** for Chrome/Edge. Live tabs land in SQLite with title, order, active flag, pinned state, and window geometry. |
+| M2 - Apps and windows | **Done.** Apps, windows, geometry, displays, tiers and redacted command lines land in SQLite. |
+| M3 - Restore | **Done.** Browsers get their missing tabs back; applications are relaunched by tier and their windows placed, including across a changed monitor layout or DPI. The review window gates both halves, per application, per browser window and per tab. |
+| M4 - T0 deltas / T2 shutdown | **Done.** Event deltas plus a `WM_QUERYENDSESSION` flush bounded at 2s. |
+| M5 - Private windows | **Done and verified with real private windows in Chrome, Edge and Firefox.** |
+| M6 - Firefox | **Done.** Runs in Firefox, connects, captures. AMO lint clean: 0 errors, 0 warnings, 0 notices. |
+| M7 - Polish | **Tray, review window and logon task done.** No MSI/MSIX installer yet, and nothing is signed. |
 
 M0-M3, M6 and most of M7 are real, plus half of M4/M5. **A session survives a reboot
 end to end on Chrome, Edge and Firefox**: applications relaunch into their old
@@ -135,7 +135,7 @@ exactly why the permission is meaningful.
 
 The sequence matters. Each milestone is independently useful and de-risks the next.
 
-### M0 — Walking skeleton (1 week)
+### M0 - Walking skeleton (1 week)
 
 Agent starts, opens SQLite, writes one hardcoded row, tray icon appears. Relay
 registered for Chrome, extension connects, `hello`/`hello_ack` round-trips.
@@ -145,7 +145,7 @@ registered for Chrome, extension connects, `hello`/`hello_ack` round-trips.
 Nothing here is throwaway, and it proves the riskiest integration (native messaging
 registration and the pipe ACL) on day one rather than week six.
 
-### M1 — Capture, tabs only, T1 only (1 week)
+### M1 - Capture, tabs only, T1 only (1 week)
 
 No T0 deltas, no T2. Just the 60s `full_state` reconcile, normal tabs only, Chrome only.
 Writes to `snapshot_id = 0`.
@@ -156,7 +156,7 @@ across a service-worker eviction (force one via `chrome://serviceworker-internal
 **Build T1 before T0.** T1 alone is a working product; T0 is an optimization on top of
 it. The opposite order gives you something that appears to work and silently drifts.
 
-### M2 — Capture, apps and windows (1.5 weeks)
+### M2 - Capture, apps and windows (1.5 weeks)
 
 `EnumWindows` + filtering (including the `DWMWA_CLOAKED` check), display enumeration with
 stable keys, `GetWindowPlacement`, ETW command lines with PEB fallback, redaction,
@@ -165,7 +165,7 @@ restore-tier assignment.
 **Done when:** the app/window table matches Alt-Tab, with no phantom UWP entries, across
 plug/unplug of an external monitor.
 
-### M3 — Restore (2 weeks)
+### M3 - Restore (2 weeks)
 
 Review window, the ordered phase pipeline, launching by tier, placement with topology
 and DPI mapping, tab injection with the diff-against-current rule, `pre_restore`
@@ -175,7 +175,7 @@ snapshot and undo, `restore_items` reporting.
 monitors, with no duplicate tabs when Chrome's own "continue where you left off" is
 also enabled. Test that case explicitly; it is the one users will hit.
 
-### M4 — T0 deltas and T2 shutdown (1 week)
+### M4 - T0 deltas and T2 shutdown (1 week)
 
 Event-driven capture with debounce and the `storage.session` outbox.
 `WM_QUERYENDSESSION` with a 2s budget.
@@ -183,20 +183,20 @@ Event-driven capture with debounce and the `storage.session` outbox.
 **Done when:** a tab opened 3 seconds before a hard power cut (pull the plug on a VM)
 is present on restore.
 
-### M5 — Private windows (1.5 weeks)
+### M5 - Private windows (1.5 weeks)
 
 DPAPI key wrapping, AES-256-GCM with AAD, `tabs_private`, TTL sweeper, `secure_delete`
 and `VACUUM`, the two-stage opt-in, collapsed review UI, delete-on-restore and
 delete-on-last-private-window-closed.
 
 **Done when:** the CI test asserting no private URL ever appears in `tabs`, `journal`,
-or any log file passes — and a hex dump of `sessions.db` after a TTL expiry contains no
+or any log file passes - and a hex dump of `sessions.db` after a TTL expiry contains no
 trace of the URL.
 
 Ship M5 last among the capture features, not first. It is the highest-risk surface and
 it benefits from the rest being stable.
 
-### M6 — Edge and Firefox (1.5 weeks)
+### M6 - Edge and Firefox (1.5 weeks)
 
 Edge is mostly registry keys and a store listing. Firefox is the real work: second
 manifest, event page instead of service worker, `discarded: true` instead of the
@@ -205,7 +205,7 @@ placeholder page, no tab groups, `allowed_extensions` manifest key.
 **Done when:** the capability matrix in [07](07-extension.md) is green end to end on all
 three browsers.
 
-### M7 — Polish and ship (2 weeks)
+### M7 - Polish and ship (2 weeks)
 
 Installer (MSI or MSIX) writing the registry keys and the scheduled task, uninstall
 with data deletion, onboarding, store submissions, the performance budget in
@@ -239,7 +239,7 @@ Automated where possible, but several of these are inherently manual:
 |---|---|---|
 | **Cloud backup** | Every privacy claim gets harder; needs E2E key management, an account system, and a sync conflict model | `machine_id`, snapshot immutability, and the `NormalTab` type that makes private exclusion structural |
 | **Cross-device restore** | App paths and monitor layouts differ per machine; needs an app-identity resolver | Env-folded paths, `app_key` as a stable hash rather than a raw path |
-| **Scroll position / form state** | Requires content scripts on every site — a categorically larger permission ask that would change the store review outcome | Nothing; would need new tables and a new permission |
+| **Scroll position / form state** | Requires content scripts on every site - a categorically larger permission ask that would change the store review outcome | Nothing; would need new tables and a new permission |
 | **macOS / Linux** | Entire watcher and launcher layer is Win32 | The store, protocol, and extension are all portable; only `sr-agent/watcher` and `restore/` are not |
 | **Arc, Brave, Vivaldi, Opera** | Chromium forks work with the Chrome build, but each needs its own registry root and listing; Arc's spaces/splits will not round-trip | Registry roots are a config list, not code |
 | **Elevated app restore** | Standing privilege escalation risk ([06](06-privacy-security.md)) | Tier D already models it as a first-class "cannot restore" outcome |
@@ -247,7 +247,7 @@ Automated where possible, but several of these are inherently manual:
 ## The one thing to validate before writing much code
 
 Build M0 and M1 first and live with them for a few days. The open question is not
-technical feasibility — everything in these specs is verified against the platform
+technical feasibility - everything in these specs is verified against the platform
 APIs. It is whether a 60-second reconcile against your actual daily browser usage
 produces a session that *feels* right when restored. If it does, the rest is
 execution. If it does not, the fix is in the capture policy and you want to learn that

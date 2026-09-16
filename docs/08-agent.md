@@ -1,4 +1,4 @@
-# 08 — Windows agent
+# 08 - Windows agent
 
 ## Crate layout
 
@@ -49,7 +49,7 @@ agent/
 
 Deliberately **not** pulling in a full GUI framework. The tray menu covers most
 interaction; the review window is the only real UI and can be a small WebView2 window
-loading local HTML — WebView2 ships with Windows 11, so it adds no install burden and
+loading local HTML - WebView2 ships with Windows 11, so it adds no install burden and
 lets the review UI share styling with the extension options page.
 
 ## Why not a Windows Service
@@ -108,7 +108,7 @@ Create a hidden message-only window and handle:
 
 Budget the final flush at **2 seconds**, hard. Windows gives an application a limited
 window before it force-terminates it, and a shutdown blocker that overstays gets the
-user a "this app is preventing shutdown" screen — a guaranteed way to make people
+user a "this app is preventing shutdown" screen - a guaranteed way to make people
 uninstall. Since T1 already bounds loss at 60s, T2 is pure upside and should never be
 allowed to become a liability.
 

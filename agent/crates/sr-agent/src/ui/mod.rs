@@ -250,6 +250,11 @@ fn open_review(
         .with_always_on_top(true)
         .build(target)?;
 
+    // The page follows the system theme through `prefers-color-scheme`, but the title
+    // bar is drawn by Windows and does not. Without this a dark review window wears a
+    // white caption bar, which looks like a rendering bug rather than a theme.
+    apply_titlebar_theme(&window);
+
     let proxy = proxy.clone();
     let webview = WebViewBuilder::new()
         .with_html(review::REVIEW_HTML)
@@ -259,6 +264,62 @@ fn open_review(
         .build(&window)?;
 
     Ok((window, webview))
+}
+
+/// Matches the window caption to the system's app theme.
+///
+/// Best effort on purpose: `DWMWA_USE_IMMERSIVE_DARK_MODE` is unsupported before
+/// Windows 10 1809 and had a different attribute number before 20H1, so a failure here
+/// means an older Windows, not a bug. A light caption is a cosmetic flaw; refusing to
+/// open the window over one would not be.
+#[cfg(windows)]
+fn apply_titlebar_theme(window: &tao::window::Window) {
+    use tao::platform::windows::WindowExtWindows;
+    use windows::Win32::Foundation::{BOOL, HWND};
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
+
+    if !system_prefers_dark() {
+        return;
+    }
+    let hwnd = HWND(window.hwnd() as _);
+    let dark = BOOL(1);
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark as *const BOOL as *const std::ffi::c_void,
+            std::mem::size_of::<BOOL>() as u32,
+        );
+    }
+}
+
+/// Reads the same setting Windows uses for its own app chrome.
+///
+/// `AppsUseLightTheme` rather than `SystemUsesLightTheme`: the first is the one that
+/// governs application windows, and the two differ on a very common configuration
+/// (dark apps, light taskbar).
+#[cfg(windows)]
+fn system_prefers_dark() -> bool {
+    use windows::core::w;
+    use windows::Win32::System::Registry::{
+        RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD,
+    };
+
+    let mut value: u32 = 1;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+            w!("AppsUseLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut value as *mut u32 as *mut std::ffi::c_void),
+            Some(&mut size),
+        )
+    };
+    // Absent means light, which is the Windows default.
+    status.is_ok() && value == 0
 }
 
 /// Carries out what the user selected.

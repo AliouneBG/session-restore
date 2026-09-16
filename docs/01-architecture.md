@@ -1,4 +1,4 @@
-# 01 — Architecture
+# 01 - Architecture
 
 ## Components
 
@@ -53,13 +53,13 @@
 ### 1. Browser extension (one build for Chrome/Edge, one for Firefox)
 
 Observes tabs, windows, and tab groups. Emits **deltas**, not snapshots. Holds no
-durable state of its own beyond a small `storage.session` outbox — the agent's SQLite
+durable state of its own beyond a small `storage.session` outbox - the agent's SQLite
 store is the single source of truth.
 
 Runs in `incognito: "spanning"` mode so one background context sees both normal and
 private windows, with an `incognito` flag on each event. (`"split"` would spawn a
 second, separate service worker per private profile and a second native-messaging
-port — more moving parts, no benefit here.)
+port - more moving parts, no benefit here.)
 
 ### 2. Native messaging relay (thin, short-lived)
 
@@ -77,7 +77,7 @@ The core. Enumerates windows and processes, owns the SQLite store, holds the
 encryption keys, runs restores, and draws the tray icon and review window.
 
 **It is not a Windows Service.** It is a per-user process launched at logon by a
-Scheduled Task. This is load-bearing — see [ADR-0001](adr/0001-user-agent-not-windows-service.md).
+Scheduled Task. This is load-bearing - see [ADR-0001](adr/0001-user-agent-not-windows-service.md).
 
 ### 4. Local store
 
@@ -90,7 +90,7 @@ The obvious design is "when the machine shuts down, write out the session." It d
 not work, for three independent reasons:
 
 1. **Chrome MV3 has no shutdown event.** `chrome.runtime.onSuspend` is not implemented
-   for service workers and the Chromium team has indicated it is unlikely to be —
+   for service workers and the Chromium team has indicated it is unlikely to be -
    precisely because a crash would bypass it and give false confidence.
 2. **The MV3 service worker is evicted after ~30s idle.** There is no persistent
    background page to hold state in memory until exit.
@@ -101,9 +101,9 @@ So the system **continuously journals**, in three tiers:
 
 | Tier | Trigger | Latency | Purpose |
 |---|---|---|---|
-| **T0 — delta** | Extension / Win32 events, debounced 2s | ~2s | Normal operation |
-| **T1 — reconcile** | Timer, every 60s (`chrome.alarms` + agent timer) | <=60s | Heals events missed during a service-worker eviction |
-| **T2 — shutdown** | `WM_QUERYENDSESSION` + `ShutdownBlockReasonCreate` | best-effort | Final flush; a bonus, never relied on |
+| **T0 - delta** | Extension / Win32 events, debounced 2s | ~2s | Normal operation |
+| **T1 - reconcile** | Timer, every 60s (`chrome.alarms` + agent timer) | <=60s | Heals events missed during a service-worker eviction |
+| **T2 - shutdown** | `WM_QUERYENDSESSION` + `ShutdownBlockReasonCreate` | best-effort | Final flush; a bonus, never relied on |
 
 **Worst-case data loss is one T1 interval (60s), even on a hard power cut.** T2 is an
 optimization, not a dependency. This is the single most important property of the
@@ -126,7 +126,7 @@ the browser runs) or attaching a debugger (see
 [ADR-0003](adr/0003-no-playwright-or-cdp.md)). Tabs are the extension's job.
 
 **Why a relay instead of the extension talking to the agent directly?** Native
-messaging spawns a *child of the browser* — it cannot connect to an already-running
+messaging spawns a *child of the browser* - it cannot connect to an already-running
 process. The alternatives are a localhost socket (rejected:
 [ADR-0002](adr/0002-native-messaging-over-localhost.md)) or this thin relay. The relay
 also gives us a natural place to attribute each message to a specific browser and
@@ -145,7 +145,7 @@ profile, which the extension cannot reliably self-report.
 ## What this architecture explicitly does not defend against
 
 Malware already running as you, at your integrity level, can read everything this system
-can read — including the DPAPI-wrapped key, because DPAPI unwraps for *you* and that
+can read - including the DPAPI-wrapped key, because DPAPI unwraps for *you* and that
 code is running as you. This is stated plainly in
 [06-privacy-security.md](06-privacy-security.md) and should be stated just as plainly in
 the product UI. The privacy design bounds *exposure over time* and *blast radius*; it

@@ -1,6 +1,6 @@
-# ADR-0006 — Build on the GNU toolchain for now, keep MSVC as the ship target
+# ADR-0006 - Build on the GNU toolchain for now, keep MSVC as the ship target
 
-**Status:** Accepted (provisional — revisit before first release)
+**Status:** Accepted (provisional - revisit before first release)
 **Date:** 2026-09-15
 **Amends:** [ADR-0005](0005-rust-for-the-agent.md)
 
@@ -12,7 +12,7 @@ Build Tools.
 
 The dev machine has no Visual Studio of any kind. Two attempts to install
 `Microsoft.VisualStudio.2022.BuildTools` via winget failed with installer exit code
-**1602 — user cancelled**: the elevation prompt does not reach the user from a
+**1602 - user cancelled**: the elevation prompt does not reach the user from a
 background process, and Build Tools cannot install without admin.
 
 Rust itself installed fine (rustup is per-user), so the blocker is specifically the
@@ -28,13 +28,13 @@ there is CI.
 
 The GNU target ships its own linker via rustup's `rust-mingw` component, so it needs no
 admin rights and no multi-gigabyte install. The open question was whether `windows-rs`
-— particularly COM — actually works there. It was verified empirically rather than
+- particularly COM - actually works there. It was verified empirically rather than
 assumed, with a probe exercising every Win32 area this project depends on:
 
 | Probe | Result |
 |---|---|
 | `EnumWindows` + `IsWindowVisible` + `GetWindowTextW` | Pass |
-| `DwmGetWindowAttribute(DWMWA_CLOAKED)` | Pass — correctly filtered cloaked windows |
+| `DwmGetWindowAttribute(DWMWA_CLOAKED)` | Pass - correctly filtered cloaked windows |
 | `GetWindowPlacement` | Pass |
 | `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `QueryFullProcessImageNameW` | Pass |
 | `CryptProtectData` (DPAPI) | Pass |
@@ -46,7 +46,7 @@ weak off-MSVC, and it is not optional for launching UWP apps.
 ## What the GNU target additionally needs (learned the hard way)
 
 rustup's `rust-mingw` component provides a **linker only**. That is enough for pure-Rust
-crates — the probe above linked fine on it — but not for the real dependency set:
+crates - the probe above linked fine on it - but not for the real dependency set:
 
 | Crate | Needs | Why |
 |---|---|---|
@@ -65,7 +65,7 @@ unpleasant class of bug.
 
 Both the MinGW `bin` directory and `~/.cargo/bin` must be on `PATH`. The winget
 installers add them to the user PATH automatically, but an already-running shell keeps
-its stale environment — open a new terminal after installing.
+its stale environment - open a new terminal after installing.
 
 This is a point in MSVC's favor: it needs one install, not two, and `rusqlite` builds
 against it without a separate C compiler.

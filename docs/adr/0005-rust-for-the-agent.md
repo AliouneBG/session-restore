@@ -1,4 +1,4 @@
-# ADR-0005 — Rust for the agent and relay
+# ADR-0005 - Rust for the agent and relay
 
 **Status:** Accepted
 **Date:** 2026-09-13
@@ -30,9 +30,9 @@ The decisive factors, in order:
    one small binary is a materially better story.
 
 3. **windows-rs is first-class.** Microsoft generates it from the Windows metadata, so
-   every API this project needs — `EnumWindows`, `SetWinEventHook`,
+   every API this project needs - `EnumWindows`, `SetWinEventHook`,
    `DwmGetWindowAttribute`, `GetWindowPlacement`, DPAPI, and the COM interfaces
-   `IApplicationActivationManager` and `IVirtualDesktopManager` — is available with
+   `IApplicationActivationManager` and `IVirtualDesktopManager` - is available with
    correct signatures and real COM support. The usual "Rust on Windows means hand-writing
    FFI" objection has not been true for years.
 
@@ -44,17 +44,17 @@ The decisive factors, in order:
 
 ## Why not the others
 
-**C#/.NET** — the strongest alternative, and the best Windows API ergonomics of the
+**C#/.NET** - the strongest alternative, and the best Windows API ergonomics of the
 four. Rejected on footprint for an always-on process and on the self-contained publish
 size. If the team were already a .NET shop this would be a defensible flip; the
 architecture does not depend on the choice.
 
-**Go** — good middle ground, fast to write, cross-compiles cleanly. Weaker on the COM
+**Go** - good middle ground, fast to write, cross-compiles cleanly. Weaker on the COM
 interop this project genuinely needs (`IApplicationActivationManager` for UWP launching
 is not optional), and the Win32 story is thinner than windows-rs. Larger binaries, GC
 pauses that do not matter here.
 
-**Node/TypeScript** — the appeal is one language across extension and agent. Rejected:
+**Node/TypeScript** - the appeal is one language across extension and agent. Rejected:
 Win32 window enumeration via `koffi`/FFI or by shelling out to PowerShell is awkward and
 slow, the runtime footprint is the worst of the four, and holding encryption keys in a
 GC'd heap with no zeroize guarantee is the weakest option for the most sensitive part of
@@ -73,7 +73,7 @@ Schema ([07](../07-extension.md)).
 - Unsafe blocks are unavoidable for Win32. Confine them to `watcher/` and `restore/`,
   wrap each in a safe abstraction, and add `#![warn(unsafe_op_in_unsafe_fn)]`. The PEB
   command-line read ([03](../03-capture.md)) is the most dangerous single piece of code
-  in the project — isolate it, make it fail soft, and never let a failure there take down
+  in the project - isolate it, make it fail soft, and never let a failure there take down
   the agent.
 
 ## Not a one-way door

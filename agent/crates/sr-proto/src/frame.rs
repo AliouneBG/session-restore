@@ -107,7 +107,7 @@ mod tests {
     fn roundtrips_non_ascii() {
         // Window and page titles routinely contain non-ASCII; a byte-length vs
         // char-length mix-up here would corrupt every frame containing one.
-        let s = r#"{"title":"Onimusha — 日本語 🎮"}"#;
+        let s = r#"{"title":"Onimusha - 日本語 🎮"}"#;
         assert_eq!(roundtrip(s), s);
     }
 

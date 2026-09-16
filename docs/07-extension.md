@@ -1,4 +1,4 @@
-# 07 — Browser extension
+# 07 - Browser extension
 
 ## Build targets
 
@@ -27,10 +27,10 @@ extension/
 
 `shared/protocol.ts` and the agent's Rust types are both generated from a single JSON
 Schema in `/schema`, so the wire format cannot drift between the two halves. This is
-worth the small build complexity — protocol drift between independently-updated
+worth the small build complexity - protocol drift between independently-updated
 components is otherwise a recurring, hard-to-diagnose bug class.
 
-## Manifest — Chrome / Edge
+## Manifest - Chrome / Edge
 
 ```json
 {
@@ -47,7 +47,7 @@ components is otherwise a recurring, hard-to-diagnose bug class.
 }
 ```
 
-## Manifest — Firefox
+## Manifest - Firefox
 
 ```json
 {
@@ -64,7 +64,7 @@ components is otherwise a recurring, hard-to-diagnose bug class.
 ```
 
 Two deliberate differences: Firefox MV3 uses an **event page** (`background.scripts`),
-not a service worker — it is less aggressively evicted and it *does* implement
+not a service worker - it is less aggressively evicted and it *does* implement
 `runtime.onSuspend`. And `tabGroups` is omitted because Firefox has no such API.
 
 ## Browser capability matrix
@@ -95,7 +95,7 @@ The single biggest source of MV3 bugs. Rules for this codebase:
    A flush that never happens because the worker died must not lose the deltas.
 3. **`chrome.alarms`, never `setTimeout`, for the T1 reconcile.** `setTimeout` does not
    survive eviction; alarms wake the worker. Minimum alarm period is 1 minute, which is
-   exactly our 60s interval — convenient, but it means the interval cannot be tuned
+   exactly our 60s interval - convenient, but it means the interval cannot be tuned
    below 60s on Chromium. Document that as a hard floor.
 4. **Debounce with an alarm too**, or accept that a 2s debounce may be cut short by
    eviction. Cut short is fine: it flushes early, which is harmless. Lost is not fine,
@@ -121,7 +121,7 @@ report restore_result
 ```
 
 The "wait then diff" is what prevents double tabs when the browser has its own
-"continue where you left off" enabled. See [04](04-restore.md) for the full reasoning —
+"continue where you left off" enabled. See [04](04-restore.md) for the full reasoning -
 it is the most important behavior in this file.
 
 ## The placeholder page (Chrome/Edge lazy loading)
@@ -133,7 +133,7 @@ it is the most important behavior in this file.
 - Renders the URL as readable text with a "Open now" button
 - Navigates to the real URL on `document.visibilitychange` -> visible
 
-It must **not** navigate on load — that would defeat lazy loading entirely. And it must
+It must **not** navigate on load - that would defeat lazy loading entirely. And it must
 degrade well: if the extension is uninstalled while placeholder tabs are open, the user
 sees a dead page. Mitigate by writing the real URL into the page body as selectable
 text, and by replacing all placeholder tabs with their real URLs on

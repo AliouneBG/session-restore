@@ -1,4 +1,4 @@
-# ADR-0002 — Native messaging + named pipe, not a localhost server
+# ADR-0002 - Native messaging + named pipe, not a localhost server
 
 **Status:** Accepted
 **Date:** 2026-09-13
@@ -19,7 +19,7 @@ A localhost listener is easier to build and worse in every way that matters here
 - **Any local process can connect.** There is no OS-level caller authentication on a TCP
   socket. The agent would be handing complete browsing history to whatever connects
   first. Bolting on a shared-secret token means storing that token somewhere both the
-  extension and the agent can read — which is somewhere any local process can read too.
+  extension and the agent can read - which is somewhere any local process can read too.
 - **Any web page can probe it.** Pages can issue cross-origin requests to
   `http://127.0.0.1:<port>`. Even without reading responses, this is a fingerprinting
   and CSRF surface, and it has been the root of several high-profile local-service
@@ -38,7 +38,7 @@ A localhost listener is easier to build and worse in every way that matters here
   `allowed_extensions` pins our extension ID. Another extension cannot connect.
 - No listening socket exists, so there is no network surface at all and no firewall
   prompt.
-- The channel is a pipe between parent and child — not addressable by anything else.
+- The channel is a pipe between parent and child - not addressable by anything else.
 - It is the mechanism both Chrome and Firefox document for exactly this purpose, which
   matters for store review.
 
@@ -61,7 +61,7 @@ read the database.
 - Name includes a hash of the user's SID: `\\.\pipe\SessionRestore.<sid-hash>`
 - Security descriptor grants access to the interactive user's SID only
 - Created with `FILE_FLAG_FIRST_PIPE_INSTANCE` so a process that starts before the agent
-  cannot squat the name and intercept relay connections — a standard named-pipe hijack
+  cannot squat the name and intercept relay connections - a standard named-pipe hijack
   that is trivial to prevent and easy to forget
 
 ## Consequences

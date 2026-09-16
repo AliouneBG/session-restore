@@ -1,4 +1,4 @@
-# 03 — Capture
+# 03 - Capture
 
 ## Capture tiers
 
@@ -26,13 +26,13 @@ all of these hold:
 | Not a tool window | `GetWindowLongPtr(GWL_EXSTYLE)` lacks `WS_EX_TOOLWINDOW` | Skip palettes, tooltips |
 | Top-level | `GetWindow(GW_OWNER)` is NULL, or it is a visible owned dialog | Skip child/owned chrome |
 | Has a title | `GetWindowTextLength > 0` | Untitled top-levels are almost always internal |
-| **Not cloaked** | `DwmGetWindowAttribute(DWMWA_CLOAKED)` returns 0 | **Load-bearing — see below** |
+| **Not cloaked** | `DwmGetWindowAttribute(DWMWA_CLOAKED)` returns 0 | **Load-bearing - see below** |
 | Not rule-ignored | `app_rules` | User allowlist |
 
 **The cloaking check is the one people miss.** Every suspended UWP/Store app, and every
 window sitting on a *different virtual desktop*, remains `IsWindowVisible == TRUE` while
 being invisible to the user. Without `DWMWA_CLOAKED` you capture a pile of phantom
-windows — Calculator, Mail, Settings — that the user never had open, and then
+windows - Calculator, Mail, Settings - that the user never had open, and then
 cheerfully "restore" them all on next boot. Filter on cloaked, but record
 `virtual_desktop_id` separately so genuinely-on-another-desktop windows are kept rather
 than dropped.
@@ -77,8 +77,8 @@ arguments) rather than failing. Record `command_line = NULL`, never a guess.
 > passwords, and signed URLs. Run every captured command line through a redaction pass
 > (`--password=`, `--token=`, `api_key=`, bearer-shaped strings, anything matching a
 > URL with a query string) and store the redacted form. A redacted argument is replaced
-> with a sentinel that restore treats as "cannot restore exactly" — degrading to tier B
-> — rather than replaying a secret onto a command line where it will show up in
+> with a sentinel that restore treats as "cannot restore exactly" - degrading to tier B
+> - rather than replaying a secret onto a command line where it will show up in
 > Task Manager and any local process listing.
 
 ### Browser window titles are page data, not app metadata
@@ -91,7 +91,7 @@ A browser window's Win32 title is the **current page title**:
 ```
 
 This matters more than it looks. If the agent stores `windows.title` verbatim for every
-window, then private browsing page titles land in the plaintext `windows` table — routing
+window, then private browsing page titles land in the plaintext `windows` table - routing
 around the encrypted `tabs_private` path entirely. The extension half would be airtight
 and the agent half would leak beside it.
 
@@ -112,7 +112,7 @@ captured in `browser_windows`; the title adds nothing the extension does not sup
 better.
 
 Detection is by `app_key` against the known-browser list, which is checked *before* the
-title is read — not by pattern-matching the title for markers like "Private Browsing".
+title is read - not by pattern-matching the title for markers like "Private Browsing".
 Those markers are localized, differ per browser, and are trivially spoofed by any page
 that sets `document.title`. Identify the process, then decide; never parse the title to
 decide whether the title is sensitive.
@@ -138,7 +138,7 @@ Hook `SetWinEventHook` for:
 | Event | Meaning |
 |---|---|
 | `EVENT_OBJECT_CREATE` / `DESTROY` | Window opened/closed |
-| `EVENT_OBJECT_LOCATIONCHANGE` | Moved or resized — **heavily debounced (2s trailing)**, this fires continuously during a drag |
+| `EVENT_OBJECT_LOCATIONCHANGE` | Moved or resized - **heavily debounced (2s trailing)**, this fires continuously during a drag |
 | `EVENT_SYSTEM_FOREGROUND` | Focus/z-order changes |
 | `EVENT_OBJECT_NAMECHANGE` | Title changed (document switched) |
 
@@ -237,7 +237,7 @@ file access to the extension.
 
 Gated on `settings.capture_private_windows`, which is **false by default**.
 
-Even when the setting is on, capture additionally requires the browser-level permission —
+Even when the setting is on, capture additionally requires the browser-level permission -
 `chrome.extension.isAllowedIncognitoAccess()` in Chrome/Edge, the equivalent
 `extension.isAllowedIncognitoAccess()` in Firefox. The user must have turned on "Allow in
 Incognito" / "Allow in InPrivate" / "Run in Private Windows" themselves; there is no API

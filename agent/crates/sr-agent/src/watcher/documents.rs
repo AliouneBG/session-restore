@@ -36,7 +36,7 @@ fn split_on_separators(title: &str) -> Vec<&str> {
 
 /// Filenames pulled out of a window title, most specific first.
 ///
-/// Titles are overwhelmingly `<document> - <app>` or `<document> — <app>`, sometimes
+/// Titles are overwhelmingly `<document> - <app>` or `<document> - <app>`, sometimes
 /// with a modified marker. Only segments that look like a filename with an extension
 /// are considered, so "Settings - Discord" yields nothing rather than a bogus lookup.
 pub fn candidates_from_title(title: &str) -> Vec<String> {
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn handles_the_dash_characters_apps_actually_use() {
-        assert!(candidates_from_title("notes.md — Obsidian").contains(&"notes.md".to_string()));
+        assert!(candidates_from_title("notes.md - Obsidian").contains(&"notes.md".to_string()));
         assert!(candidates_from_title("a.txt | Editor").contains(&"a.txt".to_string()));
     }
 

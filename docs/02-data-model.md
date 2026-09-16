@@ -1,4 +1,4 @@
-# 02 — Data model
+# 02 - Data model
 
 ## Storage layout
 
@@ -17,7 +17,7 @@ SQLite is opened with `journal_mode=WAL`, `synchronous=NORMAL`, and
 consistent database rather than a corrupt one.
 
 > `synchronous=NORMAL` under WAL can lose the last few committed transactions on power
-> loss but cannot corrupt the file. That is the right trade for us — we already accept
+> loss but cannot corrupt the file. That is the right trade for us - we already accept
 > up to 60s of loss by design, and `FULL` would mean an fsync every two seconds for the
 > life of the machine.
 
@@ -107,7 +107,7 @@ CREATE TABLE displays (
 );
 ```
 
-`display_key` must be derived from something stable across reboots and port changes —
+`display_key` must be derived from something stable across reboots and port changes -
 EDID manufacturer/serial, or the device interface path. **Monitor index is not stable**
 and using it is the classic cause of "all my windows piled onto one screen."
 
@@ -148,7 +148,7 @@ CREATE TABLE windows (
 );
 ```
 
-**`app_key` derivation** — this is the value everything else hangs off, so it must be
+**`app_key` derivation** - this is the value everything else hangs off, so it must be
 deterministic and stable across reboots:
 
 | App kind | `app_key` |
@@ -277,7 +277,7 @@ CREATE TABLE journal (
 );
 ```
 
-The journal is a **debugging and recovery aid, not the primary store** — live state is
+The journal is a **debugging and recovery aid, not the primary store** - live state is
 materialized into `snapshot_id = 0` as events arrive. The journal is capped at 50k rows
 and trimmed on a timer. Private-window events are never journaled in plaintext; they are
 either omitted or recorded as `{"private": true}` with no URL.
@@ -293,6 +293,6 @@ either omitted or recorded as `{"private": true}` with no URL.
 | Icons | Content-addressed; GC'd when unreferenced |
 
 A `VACUUM` runs after any bulk private-row deletion. Without it, plaintext-adjacent
-material can linger in freelist pages that a raw file scan would find — deletion in
+material can linger in freelist pages that a raw file scan would find - deletion in
 SQLite does not zero pages by default. Also set `PRAGMA secure_delete=ON` for the
 connection that touches `tabs_private`.

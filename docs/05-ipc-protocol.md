@@ -1,4 +1,4 @@
-# 05 — IPC protocol
+# 05 - IPC protocol
 
 ## Transport chain
 
@@ -52,7 +52,7 @@ Firefox uses `allowed_extensions` with the addon ID from
 `browser_specific_settings.gecko.id`. Same file shape otherwise.
 
 Registration is per-user (`HKCU`), written by the installer and re-verified by the agent
-at every startup — browser updates and profile resets have been known to clear them.
+at every startup - browser updates and profile resets have been known to clear them.
 
 ### Named pipe
 
@@ -61,12 +61,12 @@ at every startup — browser updates and profile resets have been known to clear
 ```
 
 Created by the agent with a security descriptor granting read/write to the interactive
-user's SID **only** — not `Everyone`, not `Authenticated Users`. Include the SID hash in
+user's SID **only** - not `Everyone`, not `Authenticated Users`. Include the SID hash in
 the name so two users on the same machine cannot collide or probe each other's pipe.
 
 The agent must create the pipe with `FILE_FLAG_FIRST_PIPE_INSTANCE` on the first
 instance. Without it, a hostile local process that starts first can squat the pipe name
-and receive the relay's connections instead — a classic named-pipe hijack.
+and receive the relay's connections instead - a classic named-pipe hijack.
 
 ### Three pipe details that are not optional
 
@@ -76,7 +76,7 @@ than an error, so none would show up in a naive implementation until it is deplo
 **1. The pipe must be opened with `FILE_FLAG_OVERLAPPED`, on both ends.**
 
 A handle opened for synchronous I/O serializes every operation on the underlying *file
-object*, and `DuplicateHandle` does not create a new file object — it adds a reference
+object*, and `DuplicateHandle` does not create a new file object - it adds a reference
 to the same one. The relay reads from the agent on one thread while writing to it on
 another, so a parked `ReadFile` blocks the `WriteFile` behind it and the two processes
 wait on each other forever. Observed as both sides stuck transferring **four bytes**.
@@ -91,15 +91,15 @@ Consequence: `ConnectNamedPipe` also needs an `OVERLAPPED`, and returns
 **2. The client must request `GENERIC_READ | GENERIC_WRITE`, not `FILE_GENERIC_*`.**
 
 `FILE_GENERIC_WRITE` contains `FILE_APPEND_DATA` (`0x0004`), and on a named pipe that
-bit means `FILE_CREATE_PIPE_INSTANCE` — a different request. The handle opens and looks
+bit means `FILE_CREATE_PIPE_INSTANCE` - a different request. The handle opens and looks
 connected either way.
 
 **3. Never call `FlushFileBuffers` on the write end.**
 
 It is documented not to return "until the reading process has read all the data from
 the pipe", which turns every frame write into a rendezvous with the peer's read
-cadence. There is no userspace buffer to flush — `WriteFile` already hands the bytes to
-the kernel — so the `flush()` implementation is deliberately a no-op.
+cadence. There is no userspace buffer to flush - `WriteFile` already hands the bytes to
+the kernel - so the `flush()` implementation is deliberately a no-op.
 
 A useful bisection tool if this area ever misbehaves again: connect a .NET
 `NamedPipeClientStream` to the agent from PowerShell. It is a known-good client, so if
@@ -118,7 +118,7 @@ it works, the fault is on our client side.
 }
 ```
 
-`src` is stamped by the **relay**, not the extension — the extension cannot be trusted
+`src` is stamped by the **relay**, not the extension - the extension cannot be trusted
 to report its own browser and profile correctly, and the relay knows both from its own
 parent process.
 
@@ -172,7 +172,7 @@ Cap at **200 tab entries per message**; split larger batches across sequential m
 to stay clear of the 1 MB native messaging limit.
 
 `private: true` is the only routing signal the agent needs. Everything with that flag
-goes to `tabs_private` — encrypted, TTL'd, never journaled in plaintext, never
+goes to `tabs_private` - encrypted, TTL'd, never journaled in plaintext, never
 cloud-eligible. That routing lives in one function; see
 [06-privacy-security.md](06-privacy-security.md).
 
@@ -251,7 +251,7 @@ Pushed when the user changes anything in the tray UI, so the extension does not 
 
 Because MV3 evicts the service worker, `connectNative` ports die routinely and that is
 **not an error condition**. The extension reconnects lazily on the next event rather
-than trying to hold a port open — attempting to keep a port alive purely to stay
+than trying to hold a port open - attempting to keep a port alive purely to stay
 resident is both fragile and a documented way to get an extension flagged during store
 review.
 

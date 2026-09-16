@@ -1,11 +1,11 @@
-# 06 — Privacy and security
+# 06 - Privacy and security
 
 ## The uncomfortable premise, stated up front
 
 This product writes a list of every application you run and every page you have open to
 disk, continuously, and offers to include the pages you opened in a private window. That
 is inherently a concentration of sensitive data. The design below is about bounding it
-honestly — not about claiming it away.
+honestly - not about claiming it away.
 
 The product UI must say this in plain language at install time. A privacy design that
 only exists in a spec document is not a privacy design.
@@ -18,7 +18,7 @@ only exists in a spec document is not a privacy design.
 | Someone who steals the disk or a backup copy of the `.db` | **Yes, for private tabs** | DPAPI user key is derived from the account credential and is not in the file; private URLs stay ciphertext. Normal tabs are plaintext by design. |
 | A local process running as *you* | **No** | It can call DPAPI as you, read the pipe, and read the DB. Nothing at your own integrity level can defend against your own integrity level. |
 | Local admin / SYSTEM | **No** | Can impersonate you and unwrap DPAPI. Out of scope. |
-| Cloud provider (if backup enabled) | **Partly** | Private tabs are structurally excluded from sync. Normal tabs would be E2E-encrypted before upload — see [09](09-roadmap.md); v1 ships no cloud path at all. |
+| Cloud provider (if backup enabled) | **Partly** | Private tabs are structurally excluded from sync. Normal tabs would be E2E-encrypted before upload - see [09](09-roadmap.md); v1 ships no cloud path at all. |
 | A hostile web page | **Yes** | No content scripts, no host permissions, no page-reachable surface in v1 |
 | A hostile extension in the same browser | **Yes** | Extensions cannot read each other's native messaging ports; `allowed_origins` pins our ID |
 | Someone looking at your screen after reboot | **Yes, deliberately** | Private tabs collapsed and unlabeled in the review UI until explicitly revealed ([04](04-restore.md)) |
@@ -42,7 +42,7 @@ when they name a file; anything else is dropped rather than kept as "metadata". 
 [03-capture.md](03-capture.md).
 
 **Window titles are classified by owning process, not by content.** A browser window's
-title is the page title, so it is C2 — or C4 if the window is private. Since the agent
+title is the page title, so it is C2 - or C4 if the window is private. Since the agent
 cannot reliably tell which browser window is private (and must not try to, by
 title-matching), it stores **no title at all** for any browser process. See
 [03-capture.md](03-capture.md). Titles for non-browser applications stay C1.
@@ -62,7 +62,7 @@ per row:  AES-256-GCM(key = DEK,
 
 Details that matter:
 
-- **`CRYPTPROTECT_UI_FORBIDDEN`** — the agent is a background process; a DPAPI prompt
+- **`CRYPTPROTECT_UI_FORBIDDEN`** - the agent is a background process; a DPAPI prompt
   there would be an invisible hang, and a background process should never be able to put
   a credential prompt on screen anyway.
 - **AAD binds the ciphertext to its row.** Without it, an attacker with write access to
@@ -81,7 +81,7 @@ Details that matter:
 
 ### What encryption here does and does not buy
 
-It protects against offline access to the database file — a stolen laptop with the
+It protects against offline access to the database file - a stolen laptop with the
 account locked, a backup copy, a synced OneDrive folder, another user on the machine. It
 does **not** protect against malware running as you, because DPAPI will unwrap for that
 process exactly as it unwraps for us. Say so in the UI.
@@ -187,7 +187,7 @@ answer ready and link to this document.
 
 Agent logs must never contain URLs, window titles, or command lines at default level.
 Log `tab_key` hashes and counts. A verbose mode may log normal URLs; **no log level ever
-writes a private URL**, including crash dumps — install a panic hook that scrubs, and
+writes a private URL**, including crash dumps - install a panic hook that scrubs, and
 disable Windows Error Reporting dumps for the agent process, since a dump would contain
 decrypted URLs and the DEK in memory.
 

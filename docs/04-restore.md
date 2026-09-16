@@ -1,4 +1,4 @@
-# 04 — Restore
+# 04 - Restore
 
 ## When restore happens
 
@@ -24,7 +24,7 @@ everything on the built-in panel.
 
 Prefer, in order: the newest `kind='shutdown'` snapshot from this boot cycle; otherwise
 the live state (`snapshot_id = 0`) as of last write. If the newest shutdown snapshot is
-more than 7 days old, do not auto-restore — ask, because the user's situation has
+more than 7 days old, do not auto-restore - ask, because the user's situation has
 probably moved on.
 
 ## The review window
@@ -49,7 +49,7 @@ honest fidelity tier:
 
 Two things in that mock are deliberate:
 
-- **Tiers are shown, not hidden.** "launch only — no saved arguments" sets the right
+- **Tiers are shown, not hidden.** "launch only - no saved arguments" sets the right
   expectation before the user clicks, instead of producing a confusing result after.
 - **Private windows are collapsed, unchecked, and require a separate click.** Their
   URLs are not rendered until the user presses *Show*. Someone doing a screen share
@@ -79,7 +79,7 @@ with a **20-second budget**; if no matching window appears, the item is marked
 blocks the pipeline.
 
 Matching a new window back to the app that was launched uses PID first (the PID returned
-by `CreateProcess`), falling back to `app_key` match on any new window — necessary
+by `CreateProcess`), falling back to `app_key` match on any new window - necessary
 because many apps (Chrome, Slack, Teams) relaunch through a stub process and the window
 ends up owned by a different PID than the one we started.
 
@@ -93,13 +93,13 @@ ends up owned by a different PID than the one we started.
 | C | `ShellExecuteExW` on the *document* path, letting the shell pick the handler |
 | D | Never launched; listed as skipped with a reason |
 
-UWP apps genuinely require `IApplicationActivationManager` — packaged apps have no
+UWP apps genuinely require `IApplicationActivationManager` - packaged apps have no
 launchable exe path, and `CreateProcess` against the one in `WindowsApps` fails or
 produces a broken instance. Instantiate it with `CLSCTX_LOCAL_SERVER`.
 
 **Never launch elevated.** The agent runs at medium integrity and stays there. An app
-that was running elevated is tier D, listed as "needs admin — start it yourself." The
-alternative — an auto-elevating restore path — would be a local privilege escalation
+that was running elevated is tier D, listed as "needs admin - start it yourself." The
+alternative - an auto-elevating restore path - would be a local privilege escalation
 primitive sitting on the machine permanently, triggered by data in a database file. Not
 worth it for the convenience.
 
@@ -132,7 +132,7 @@ This is the failure mode most likely to make the product feel broken, and it nee
 handling explicitly.
 
 Chrome, Edge, and Firefox all have their own "continue where you left off" session
-restore. If it is enabled, the browser reopens the user's tabs by itself — and then our
+restore. If it is enabled, the browser reopens the user's tabs by itself - and then our
 extension connects and injects the same tabs again. The user gets everything twice.
 
 **Resolution: reconcile, never blindly inject.**
@@ -149,7 +149,7 @@ on extension startup (runtime.onStartup):
 
 URL normalization for the diff: strip the fragment, strip known tracking parameters,
 lowercase the host, drop a trailing slash on an empty path. Do **not** strip the query
-string in general — `?id=1234` is a different page.
+string in general - `?id=1234` is a different page.
 
 The "never close" rule matters. A restore tool that closes tabs is a tool that destroys
 work. We only ever add.
@@ -161,7 +161,7 @@ on a machine still finishing logon. The browsers differ, and the difference is r
 
 | Browser | Mechanism |
 |---|---|
-| **Firefox** | `browser.tabs.create({ url, discarded: true, title })` — first-class support; the tab appears with its real title and favicon and loads only when clicked |
+| **Firefox** | `browser.tabs.create({ url, discarded: true, title })` - first-class support; the tab appears with its real title and favicon and loads only when clicked |
 | **Chrome / Edge** | No `discarded` option on `tabs.create`. Two workarounds: create the tab, then call `chrome.tabs.discard(tabId)` once it exists; or create a placeholder extension page (`restore.html?u=...&t=...`) that navigates to the real URL on first activation |
 
 For Chrome/Edge, **use the placeholder page.** `tabs.discard()` after creation still
@@ -195,7 +195,7 @@ Additional gates beyond the normal flow:
 1. `settings.capture_private_windows` is on **and** the rows have not passed `expires_at`
 2. The extension still has incognito access (re-check `isAllowedIncognitoAccess()`)
 3. The user explicitly clicked *Restore* on the collapsed private group in the review
-   window — private windows are **never** part of an `auto` restore, ever
+   window - private windows are **never** part of an `auto` restore, ever
 
 Then: `windows.create({ incognito: true, url: [...] })`. Decryption happens in the agent
 immediately before sending, and the plaintext URLs exist only in that one IPC message.

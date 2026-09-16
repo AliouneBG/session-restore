@@ -28,6 +28,7 @@ USAGE:
                                   --keep-data  leave the captured sessions in place
   sr-agent --status             Show registration and database status
   sr-agent --capture            Run one application/window capture pass and print it
+  sr-agent --documents          Show how window titles resolve to document paths
   sr-agent --restore-apps       Launch and place the applications from the newest snapshot
                                   --dry-run   decide everything, start nothing
                                   --snapshot=<ID>  restore a specific snapshot
