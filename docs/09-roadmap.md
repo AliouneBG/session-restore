@@ -9,7 +9,7 @@
 | M2 — Apps and windows | **Done.** Apps, windows, geometry, displays, tiers and redacted command lines land in SQLite. |
 | M3 — Restore | **Done.** Browsers get their missing tabs back; applications are relaunched by tier and their windows placed, including across a changed monitor layout or DPI. No review UI, so app restore is opt-in. |
 | M4 — T0 deltas / T2 shutdown | **Done.** Event deltas plus a `WM_QUERYENDSESSION` flush bounded at 2s. |
-| M5 — Private windows | Storage, crypto, TTL and the chokepoint are done and tested; the **two-stage opt-in has not been exercised with a real private window**. |
+| M5 — Private windows | **Storage, crypto, TTL, chokepoint and the refusal path are verified.** The one step never exercised is a private tab flowing from a real private window, which needs a browser permission that cannot be scripted - see below. |
 | M6 — Firefox | **Done.** Runs in Firefox, connects, captures. AMO lint clean: 0 errors, 0 warnings, 0 notices. |
 | M7 — Polish | **Tray, review window and logon task done.** No MSI/MSIX installer yet, and nothing is signed. |
 
@@ -38,6 +38,9 @@ listed below.
   AUMID needed to relaunch them
 - Not one browser window stored a page title, with private windows open at the time
 - Firefox: extension loads, connects, and reconciles on the alarm
+- The private-window gate refusing correctly: with `capture_private_windows` on but the
+  browser permission absent, the extension reported `incognito_access=false` and
+  captured zero private tabs
 - The review window renders the real session with per-app checkboxes and honest tiers
 - Closing Calculator and Notepad, then restoring: both relaunched through
   IApplicationActivationManager
@@ -46,9 +49,6 @@ listed below.
 
 ### Known gaps
 
-- No tray, no review window; `--status` is the only UI.
-- A `pre_restore` snapshot is taken on every restore, but nothing consumes it yet -
-  there is no Undo action.
 - Browser tab restore is still offered whenever `restore_mode` is not `off`, without
   going through the review window. Only application restore is gated on the review.
 - No installer. The agent runs from its build directory, and nothing is code-signed,
@@ -57,7 +57,6 @@ listed below.
   places it there automatically). An MSVC build links it statically and needs no DLL.
 - Restore does not yet reopen documents (tier C is planned but unused), and window
   z-order and focus are not restored.
-- Firefox untested.
 - App capture polls every 60s rather than using `SetWinEventHook`, so window moves take
   up to a minute to register. Event hooks are an optimization on a pass that is now
   known-correct.
@@ -68,6 +67,28 @@ listed below.
   up, so processes are read one at a time rather than cached as they start.
 - Virtual desktop membership is not captured; see [08](08-agent.md) for why the public
   API is not enough.
+
+### The one manual verification left
+
+Private-window *capture* has never been exercised with a real private window, because
+the browser-side half of the opt-in cannot be automated: Chromium protects the setting
+with an HMAC over `Secure Preferences`, and Firefox's
+`extensions.allowPrivateBrowsingByDefault` does not apply to temporarily-installed
+add-ons. That resistance is the feature working as intended - it is exactly why the
+permission is meaningful.
+
+Everything either side of that step is verified: the encrypted write, the TTL sweep,
+the purge, the "never appears in any byte on disk" property, and the refusal path when
+the permission is absent. To close the gap by hand:
+
+1. `sr-agent --status` should say `Private capture: on` (set it in the tray/settings first)
+2. Chrome/Edge: extensions page -> Session Restore -> Details -> *Allow in Incognito* /
+   *Allow in InPrivate*. Firefox: `about:addons` -> Session Restore ->
+   *Run in Private Windows* -> Allow
+3. Open a private window, load a page, wait ~60s
+4. `sr-agent --status` should show a non-zero `Private tabs` count
+5. Confirm nothing leaked: the URL must not appear anywhere in
+   `%LOCALAPPDATA%\SessionRestore\sessions.db`
 
 ## Build order
 
