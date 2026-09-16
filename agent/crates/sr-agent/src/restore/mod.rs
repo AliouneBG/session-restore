@@ -218,6 +218,106 @@ pub fn build_private_payload(
     })
 }
 
+/// A browser the restore needs running, and the executable that starts it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserLaunch {
+    /// The id the extension reports in `hello`, e.g. `edge`.
+    pub browser: String,
+    pub exe_path: String,
+}
+
+/// The browser id the extension will report for an executable we captured.
+///
+/// Only the three browsers with a registered native messaging host
+/// ([`crate::setup::BROWSERS`]) can produce an offer to wait for, so launching
+/// anything else would open a browser and restore nothing into it.
+fn browser_id_for_exe(exe_path: &str) -> Option<&'static str> {
+    let name = std::path::Path::new(exe_path)
+        .file_name()?
+        .to_string_lossy()
+        .to_lowercase();
+    Some(match name.as_str() {
+        "chrome.exe" => "chrome",
+        "msedge.exe" => "edge",
+        "firefox.exe" => "firefox",
+        _ => return None,
+    })
+}
+
+/// Browsers a confirmed restore needs, that are not already running.
+///
+/// Without this the browser half of a restore was conditional on the user, because a
+/// restore offer waits in `pending_restore` for an extension to connect and nothing
+/// makes one connect. After a reboot no browser is running, which is the *only* case
+/// that matters, so ticking a browser window in the review window meant "restore these
+/// tabs the next time you happen to open Edge" - a promise the user had no reason to
+/// read that way, and no way to tell had not been kept.
+///
+/// "Already running" is read from live state rather than by enumerating processes,
+/// because the caller captures the desktop immediately before asking. A browser
+/// running with no window does not count: it cannot show the user anything, and
+/// starting it is what they asked for.
+pub fn browsers_to_launch(
+    db: &Db,
+    snapshot_id: i64,
+    wanted_windows: &std::collections::HashSet<String>,
+) -> Result<Vec<BrowserLaunch>> {
+    let mut stmt = db.conn.prepare(
+        "SELECT DISTINCT browser, browser_window_id FROM browser_windows
+         WHERE snapshot_id = ?1 AND is_private = 0",
+    )?;
+    let wanted: std::collections::HashSet<String> = stmt
+        .query_map([snapshot_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .filter_map(Result::ok)
+        .filter(|(_, window_id)| wanted_windows.contains(window_id))
+        .map(|(browser, _)| browser)
+        .collect();
+    drop(stmt);
+
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // What is on screen right now, by browser id.
+    let mut stmt = db.conn.prepare(
+        "SELECT exe_path FROM apps WHERE snapshot_id = ?1 AND is_browser = 1
+           AND exe_path IS NOT NULL",
+    )?;
+    let running: std::collections::HashSet<String> = stmt
+        .query_map([crate::store::db::LIVE], |r| r.get::<_, String>(0))?
+        .filter_map(Result::ok)
+        .filter_map(|p| browser_id_for_exe(&p).map(str::to_string))
+        .collect();
+
+    // Where each browser lives, from the snapshot that recorded it.
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let paths: Vec<String> = stmt
+        .query_map([snapshot_id], |r| r.get::<_, String>(0))?
+        .filter_map(Result::ok)
+        .collect();
+    drop(stmt);
+
+    for exe_path in paths {
+        let Some(browser) = browser_id_for_exe(&exe_path) else {
+            continue;
+        };
+        if !wanted.contains(browser) || running.contains(browser) {
+            continue;
+        }
+        if !seen.insert(browser.to_string()) {
+            continue;
+        }
+        out.push(BrowserLaunch {
+            browser: browser.to_string(),
+            exe_path,
+        });
+    }
+    Ok(out)
+}
+
 /// How long after a restore begins that further runs count as the same episode.
 ///
 /// One restore is several runs: the applications, then each browser as it connects.

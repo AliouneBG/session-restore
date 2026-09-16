@@ -547,3 +547,97 @@ fn live_tab(db: &Db, tab_key: &str) {
         )
         .unwrap();
 }
+
+/// Seeds a browser application row, the way a desktop capture would.
+fn browser_app(db: &Db, snapshot_id: i64, key: &str, exe: &str) {
+    db.conn
+        .execute(
+            "INSERT OR REPLACE INTO apps (snapshot_id, app_key, kind, exe_path, display_name,
+             is_browser, restore_tier)
+             VALUES (?1, ?2, 'win32', ?3, 'browser', 1, 'A')",
+            rusqlite::params![snapshot_id, key, exe],
+        )
+        .unwrap();
+}
+
+/// The gap this closes: a restore offer waits for an extension to connect, and after a
+/// reboot no browser is running to connect one. Ticking a browser window meant
+/// "restore these tabs the next time you happen to open Edge".
+#[test]
+fn a_browser_that_is_not_running_is_started_for_the_restore() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    let db = h.shared.db.lock().unwrap();
+    let snapshot_id: i64 = db
+        .conn
+        .query_row("SELECT MAX(id) FROM snapshots", [], |r| r.get(0))
+        .unwrap();
+
+    browser_app(&db, snapshot_id, "app-chrome", r"C:\Program Files\Chrome\chrome.exe");
+
+    let wanted: std::collections::HashSet<String> = ["w-old".to_string()].into_iter().collect();
+    let plan = sr_agent::restore::browsers_to_launch(&db, snapshot_id, &wanted).unwrap();
+
+    assert_eq!(plan.len(), 1, "the snapshot's browser was not planned");
+    assert_eq!(plan[0].browser, "chrome");
+    assert!(plan[0].exe_path.ends_with("chrome.exe"));
+}
+
+#[test]
+fn a_browser_that_is_already_running_is_left_alone() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    let db = h.shared.db.lock().unwrap();
+    let snapshot_id: i64 = db
+        .conn
+        .query_row("SELECT MAX(id) FROM snapshots", [], |r| r.get(0))
+        .unwrap();
+
+    browser_app(&db, snapshot_id, "app-chrome", r"C:\Program Files\Chrome\chrome.exe");
+    // The caller captures the desktop first, so live state is what is on screen now.
+    browser_app(&db, 0, "app-chrome-live", r"C:\Program Files\Chrome\chrome.exe");
+
+    let wanted: std::collections::HashSet<String> = ["w-old".to_string()].into_iter().collect();
+    let plan = sr_agent::restore::browsers_to_launch(&db, snapshot_id, &wanted).unwrap();
+    assert!(plan.is_empty(), "started a browser that was already open: {plan:?}");
+}
+
+#[test]
+fn a_browser_whose_windows_were_all_unticked_is_not_started() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    let db = h.shared.db.lock().unwrap();
+    let snapshot_id: i64 = db
+        .conn
+        .query_row("SELECT MAX(id) FROM snapshots", [], |r| r.get(0))
+        .unwrap();
+
+    browser_app(&db, snapshot_id, "app-chrome", r"C:\Program Files\Chrome\chrome.exe");
+
+    let plan =
+        sr_agent::restore::browsers_to_launch(&db, snapshot_id, &Default::default()).unwrap();
+    assert!(plan.is_empty(), "started a browser the user had unticked: {plan:?}");
+}
+
+/// A private window is never part of an offer, so starting a browser for one would
+/// open it and restore nothing.
+#[test]
+fn a_private_window_alone_does_not_start_a_browser() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    let db = h.shared.db.lock().unwrap();
+    let snapshot_id: i64 = db
+        .conn
+        .query_row("SELECT MAX(id) FROM snapshots", [], |r| r.get(0))
+        .unwrap();
+
+    browser_app(&db, snapshot_id, "app-chrome", r"C:\Program Files\Chrome\chrome.exe");
+    db.conn
+        .execute(
+            "INSERT INTO browser_windows (snapshot_id, browser_window_id, browser,
+             profile_key, is_private, window_state, focused, updated_at)
+             VALUES (?1,'w-priv','chrome','default',1,'normal',0,0)",
+            [snapshot_id],
+        )
+        .unwrap();
+
+    let wanted: std::collections::HashSet<String> = ["w-priv".to_string()].into_iter().collect();
+    let plan = sr_agent::restore::browsers_to_launch(&db, snapshot_id, &wanted).unwrap();
+    assert!(plan.is_empty(), "started a browser for a private window: {plan:?}");
+}

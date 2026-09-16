@@ -285,7 +285,7 @@ fn apply_choice(
     let selected: std::collections::HashSet<&str> =
         choice.apps.iter().map(|s| s.as_str()).collect();
 
-    let (apps, displays, run_id) = {
+    let (apps, displays, run_id, browsers) = {
         let db = db.lock().unwrap();
         let all = match crate::restore::apps::plan_from_snapshot(&db, snapshot_id) {
             Ok(a) => a,
@@ -329,14 +329,31 @@ fn apply_choice(
             }
         };
 
+        // A browser that is not running will never connect, and the offer recorded
+        // above waits for a connection. After a reboot that is every browser.
+        let wanted: std::collections::HashSet<String> =
+            choice.browser_windows.iter().cloned().collect();
+        let browsers = crate::restore::browsers_to_launch(&db, snapshot_id, &wanted)
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "could not work out which browsers to start");
+                Vec::new()
+            });
+
         let displays = crate::watcher::displays::enumerate().unwrap_or_default();
-        (picked, displays, run_id)
+        (picked, displays, run_id, browsers)
     };
 
     // Launching blocks on staggered sleeps, so it runs off the UI thread; holding the
     // message pump would freeze the tray for the duration.
     let db = Arc::clone(db);
     std::thread::spawn(move || {
+        for b in &browsers {
+            match crate::restore::launch::launch_via_shell(&b.exe_path) {
+                Ok(_) => tracing::info!(browser = %b.browser, "started for restore"),
+                Err(e) => tracing::warn!(browser = %b.browser, error = %e, "could not start"),
+            }
+        }
+
         let report = crate::restore::apps::restore_apps(&apps, &displays, false);
         tracing::info!(
             launched = report.launched.len(),
