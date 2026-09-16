@@ -219,8 +219,11 @@ export function attach(opts: CollectorOptions): void {
     outbox.window({ op: "remove", window_id: windowKey(id) });
   });
 
-  // Tab groups are Chromium-only; Firefox has no such API.
-  if (typeof chrome.tabGroups !== "undefined") {
+  // Tab groups are Chromium-only. `__HAS_TAB_GROUPS__` is a build-time constant, so
+  // this block is removed entirely from the Firefox bundle rather than skipped at
+  // runtime.
+  if (__HAS_TAB_GROUPS__) {
+    if (typeof chrome.tabGroups === "undefined") return;
     const onGroup = (g: chrome.tabGroups.TabGroup) => {
       const d = groupToDelta(g);
       if (d) outbox.group(d);

@@ -23,7 +23,11 @@ export interface Caps {
 }
 
 function hasTabGroups(): boolean {
-  return typeof chrome !== "undefined" && typeof (chrome as any).tabGroups !== "undefined";
+  return (
+    __HAS_TAB_GROUPS__ &&
+    typeof chrome !== "undefined" &&
+    typeof (chrome as any).tabGroups !== "undefined"
+  );
 }
 
 /**

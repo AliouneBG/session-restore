@@ -93,9 +93,17 @@ fn cmd_install(args: &[String]) -> Result<()> {
         ids.firefox = firefox;
     }
 
-    let done = sr_agent::setup::install(&dir, &ids)?;
+    let (done, task_ok) = sr_agent::setup::install_all(&dir, &ids)?;
     println!("Registered native messaging host for: {}", done.join(", "));
     println!("Manifests in {}", dir.display());
+    println!(
+        "Logon task: {}",
+        if task_ok {
+            "registered (the agent will start automatically at sign-in)"
+        } else {
+            "NOT registered - run --install again, or start the agent manually"
+        }
+    );
 
     if ids.chromium.is_empty() {
         // Not an error: registration is still correct, it just admits no extension
@@ -112,7 +120,7 @@ fn cmd_install(args: &[String]) -> Result<()> {
 fn cmd_uninstall() -> Result<()> {
     let dir = data_dir()?;
     sr_agent::setup::uninstall(&dir)?;
-    println!("Removed native messaging registrations and manifests.");
+    println!("Removed native messaging registrations, manifests, and the logon task.");
     println!(
         "Captured session data in {} was left in place; delete it to remove everything.",
         dir.display()
@@ -132,6 +140,14 @@ fn cmd_status() -> Result<()> {
     println!(
         "Registered:      {}",
         if sr_agent::setup::is_installed(&dir) {
+            "yes"
+        } else {
+            "no - run: sr-agent --install"
+        }
+    );
+    println!(
+        "Starts at logon: {}",
+        if sr_agent::setup::task::is_installed() {
             "yes"
         } else {
             "no - run: sr-agent --install"

@@ -8,6 +8,8 @@
 //! have been observed to clear them, and a silently missing key looks exactly like
 //! "the extension stopped working for no reason".
 
+pub mod task;
+
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -175,6 +177,24 @@ pub fn install(data_dir: &Path, ids: &Ids) -> Result<Vec<String>> {
     Ok(done)
 }
 
+/// Everything needed for the agent to work after a reboot: native messaging hosts for
+/// every browser, plus the logon task that starts it.
+pub fn install_all(data_dir: &Path, ids: &Ids) -> Result<(Vec<String>, bool)> {
+    let browsers = install(data_dir, ids)?;
+    let exe = std::env::current_exe().context("locating the agent binary")?;
+    let task_ok = match task::install(&exe) {
+        Ok(()) => true,
+        Err(e) => {
+            // Registration of the browser hosts still succeeded and is useful on its
+            // own, so this is reported rather than failing the whole install.
+            tracing::warn!(error = %e, "could not register the logon task");
+            eprintln!("warning: could not register the logon task: {e:#}");
+            false
+        }
+    };
+    Ok((browsers, task_ok))
+}
+
 /// Removes registry keys and manifests. Part of a clean uninstall - a privacy tool
 /// that leaves registry pointers behind has not really uninstalled (docs/06).
 pub fn uninstall(data_dir: &Path) -> Result<()> {
@@ -182,6 +202,7 @@ pub fn uninstall(data_dir: &Path) -> Result<()> {
         let _ = delete_registry_key(b.reg_root, HOST_NAME);
         let _ = std::fs::remove_file(data_dir.join(b.manifest_file));
     }
+    let _ = task::uninstall();
     Ok(())
 }
 

@@ -32,9 +32,22 @@ async function build(target) {
       outfile: join(outdir, out),
       bundle: true,
       format: "esm",
-      target: target === "firefox" ? "firefox128" : "chrome116",
+      target: target === "firefox" ? "firefox140" : "chrome116",
       sourcemap: true,
       logLevel: "info",
+      // Syntax minification only. This is what actually removes the dead branches the
+      // `define` above turns into `if (false)`; esbuild does not drop them otherwise.
+      // Identifiers and whitespace are deliberately left alone so the shipped bundle
+      // stays readable, which matters for AMO and Chrome Web Store review.
+      minifySyntax: true,
+      minifyIdentifiers: false,
+      minifyWhitespace: false,
+      define: {
+        // Compiled out per target rather than guarded at runtime. Firefox has no tab
+        // group API, and leaving the references in makes AMO's linter flag every one
+        // of them as an incompatible API - noise that hides real findings in review.
+        __HAS_TAB_GROUPS__: String(target !== "firefox"),
+      },
     });
     if (watch) await ctx.watch();
     else {

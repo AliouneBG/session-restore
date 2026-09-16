@@ -72,9 +72,9 @@ export async function runReconcile(deps: ReconcileDeps): Promise<void> {
     }
   }
 
-  if (typeof chrome.tabGroups !== "undefined") {
+  if (__HAS_TAB_GROUPS__) {
     try {
-      for (const g of await chrome.tabGroups.query({})) {
+      for (const g of await chrome.tabGroups!.query({})) {
         const gd = groupToDelta(g);
         if (gd) sink.group(gd);
       }
