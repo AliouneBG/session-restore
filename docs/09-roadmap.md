@@ -6,17 +6,17 @@
 |---|---|
 | M0 — Walking skeleton | **Done.** Verified against real Edge end to end. |
 | M1 — Capture, tabs, T1 reconcile | **Done** for Chrome/Edge. Live tabs land in SQLite with title, order, active flag, pinned state, and window geometry. |
-| M2 — Apps and windows | **Capture done.** Apps, windows, geometry, displays, tiers and redacted command lines land in SQLite. Launching them back is still unwritten. |
-| M3 — Restore | **Browser half done.** A reboot cycle restores tabs into a real browser, adding only what is missing. App restore is still M2 work. |
+| M2 — Apps and windows | **Done.** Apps, windows, geometry, displays, tiers and redacted command lines land in SQLite. |
+| M3 — Restore | **Done.** Browsers get their missing tabs back; applications are relaunched by tier and their windows placed, including across a changed monitor layout or DPI. No review UI, so app restore is opt-in. |
 | M4 — T0 deltas / T2 shutdown | T0 event deltas done. T2 shutdown hook not written. |
 | M5 — Private windows | Storage, crypto, TTL and the chokepoint are done and tested; the **two-stage opt-in has not been exercised with a real private window**. |
 | M6 — Firefox | Builds and manifests exist; **not yet loaded in Firefox**. |
 | M7 — Polish | Not started. No installer, no tray, no review UI. |
 
-Roughly M0, M1, M2 capture, the browser half of M3, and half of M4/M5 are real. The
-honest summary is that **the session is fully captured, and only browsers are restored
-so far** - the agent knows which applications were open, where, and how to launch them,
-but nothing launches them yet.
+M0, M1, M2, M3 and half of M4/M5 are real. **A session survives a reboot end to end:
+applications relaunch into their old positions and browsers get their tabs back.** What
+is missing is the packaging and the interface around it - no installer, no tray, no
+review window - plus Firefox, which has never been loaded.
 
 ### Verified by running it, not just by tests
 
@@ -33,6 +33,10 @@ but nothing launches them yet.
   Notepad, each with the right tier, env-folded paths, and Store apps carrying the
   AUMID needed to relaunch them
 - Not one browser window stored a page title, with private windows open at the time
+- Closing Calculator and Notepad, then restoring: both relaunched through
+  IApplicationActivationManager
+- Window placement round-trip: a window at 116,129 (689x489) was moved to 40,40
+  (400x300), and restore put it back at exactly 116,129 (689x489)
 
 ### Known gaps
 
@@ -43,6 +47,12 @@ but nothing launches them yet.
   there is no Undo action.
 - Restore is offered automatically; `restore_mode = ask` is stored and honoured only as
   "off or not", because there is no review UI to ask with.
+- Application restore therefore requires `restore_mode = auto` explicitly, rather than
+  treating `ask` as consent. Launching a dozen applications unprompted is more
+  intrusive than adding tabs, and until there is a window to ask with, the honest
+  default is not to. `--restore-apps` does it on demand.
+- Restore does not yet reopen documents (tier C is planned but unused), and window
+  z-order and focus are not restored.
 - Firefox untested.
 - App capture polls every 60s rather than using `SetWinEventHook`, so window moves take
   up to a minute to register. Event hooks are an optimization on a pass that is now

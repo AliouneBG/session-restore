@@ -26,6 +26,9 @@ USAGE:
   sr-agent --uninstall          Remove registrations and manifests
   sr-agent --status             Show registration and database status
   sr-agent --capture            Run one application/window capture pass and print it
+  sr-agent --restore-apps       Launch and place the applications from the newest snapshot
+                                  --dry-run   decide everything, start nothing
+                                  --snapshot=<ID>  restore a specific snapshot
 
 INSTALL OPTIONS:
   --chrome-id=<ID>    Chrome/Edge extension ID. Repeatable.
@@ -52,6 +55,8 @@ fn main() {
         cmd_status()
     } else if args.iter().any(|a| a == "--capture") {
         cmd_capture()
+    } else if args.iter().any(|a| a == "--restore-apps") {
+        cmd_restore_apps(&args)
     } else {
         run()
     };
@@ -250,6 +255,101 @@ fn cmd_capture() -> Result<()> {
     Ok(())
 }
 
+fn cmd_restore_apps(args: &[String]) -> Result<()> {
+    let dry = args.iter().any(|a| a == "--dry-run");
+    let dir = data_dir()?;
+    let db = Db::open(&dir.join("sessions.db"))?;
+
+    let snapshot_id = match flag_values(args, "--snapshot=").first() {
+        Some(v) => v.parse::<i64>().context("--snapshot expects a number")?,
+        None => match snapshot::newest_restorable(&db)? {
+            Some(id) => id,
+            None => {
+                println!("No snapshot to restore from. Run --capture first, or restart the agent.");
+                return Ok(());
+            }
+        },
+    };
+
+    let apps = sr_agent::restore::apps::plan_from_snapshot(&db, snapshot_id)?;
+    if apps.is_empty() {
+        println!("Snapshot #{snapshot_id} has no non-browser applications.");
+        return Ok(());
+    }
+
+    println!(
+        "{} applications from snapshot #{snapshot_id}{}",
+        apps.len(),
+        if dry { " (dry run - nothing will start)" } else { "" }
+    );
+    for a in &apps {
+        println!(
+            "  {:<6} {:<24} {} window(s)",
+            a.tier.as_str(),
+            a.display_name,
+            a.windows.len()
+        );
+    }
+    println!();
+
+    // An undo point before touching anything, even in a dry run: the snapshot is
+    // cheap and having one is the difference between a reversible mistake and a
+    // permanent one.
+    let run_id = sr_agent::restore::begin_run(&db, snapshot_id, "manual")?;
+
+    let displays = sr_agent::watcher::displays::enumerate()?;
+    let report = sr_agent::restore::apps::restore_apps(&apps, &displays, dry);
+
+    println!("Launched: {}", report.launched.len());
+    for name in &report.launched {
+        println!("  + {name}");
+    }
+    if !report.skipped.is_empty() {
+        println!("Skipped:");
+        for (name, why) in &report.skipped {
+            println!("  - {name}: {why}");
+        }
+    }
+    if !report.failed.is_empty() {
+        println!("Failed:");
+        for (name, why) in &report.failed {
+            println!("  ! {name}: {why}");
+        }
+    }
+    println!("Windows placed: {}", report.placed);
+
+    db.conn.execute(
+        "UPDATE restore_runs SET finished_at = ?1 WHERE id = ?2",
+        rusqlite::params![sr_proto::now_millis(), run_id],
+    )?;
+    Ok(())
+}
+
+/// Launches and places the applications from a snapshot, recording a restore run.
+fn restore_apps_at_startup(db: &Db, snapshot_id: i64) -> Result<(usize, usize)> {
+    let apps = sr_agent::restore::apps::plan_from_snapshot(db, snapshot_id)?;
+    if apps.is_empty() {
+        return Ok((0, 0));
+    }
+
+    let run_id = sr_agent::restore::begin_run(db, snapshot_id, "auto")?;
+    let displays = sr_agent::watcher::displays::enumerate()?;
+    let report = sr_agent::restore::apps::restore_apps(&apps, &displays, false);
+
+    for (name, why) in &report.failed {
+        tracing::warn!(app = %name, reason = %why, "application could not be restored");
+    }
+    for (name, why) in &report.skipped {
+        tracing::info!(app = %name, reason = %why, "application skipped");
+    }
+
+    db.conn.execute(
+        "UPDATE restore_runs SET finished_at = ?1 WHERE id = ?2",
+        rusqlite::params![sr_proto::now_millis(), run_id],
+    )?;
+    Ok((report.launched.len(), report.placed))
+}
+
 fn run() -> Result<()> {
     init_logging();
     tracing::info!(version = AGENT_VERSION, "starting");
@@ -296,6 +396,41 @@ fn run() -> Result<()> {
 
     if let Err(e) = snapshot::prune(&db, db.setting_i64("snapshot_retention_count", 20)) {
         tracing::warn!(error = %e, "snapshot prune failed");
+    }
+
+    // Application restore, if the user has asked for it.
+    //
+    // Gated on `restore_mode = auto` specifically, not merely "not off" as the browser
+    // path is. Launching a dozen applications unprompted is materially more intrusive
+    // than adding tabs to a browser the user just opened, and until there is a review
+    // window to ask with, the honest default is not to do it. `ask` therefore behaves
+    // as "not yet" here rather than silently meaning "yes".
+    if let Some(snapshot_id) = pending {
+        let mode = db.setting("restore_mode")?.unwrap_or_else(|| "ask".into());
+        if mode == "auto" {
+            match restore_apps_at_startup(&db, snapshot_id) {
+                Ok((launched, placed)) => {
+                    tracing::info!(launched, placed, "restored applications")
+                }
+                // A failed app restore must not stop the agent from capturing.
+                Err(e) => tracing::error!(error = %e, "application restore failed"),
+            }
+        } else {
+            let count: i64 = db
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM apps WHERE snapshot_id = ?1 AND is_browser = 0",
+                    [snapshot_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            if count > 0 {
+                tracing::info!(
+                    apps = count,
+                    "applications available to restore; run --restore-apps, or set restore_mode=auto"
+                );
+            }
+        }
     }
 
     let shared = Arc::new(Shared {

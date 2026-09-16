@@ -1,12 +1,16 @@
-//! Restore orchestration, browser half.
+//! Restore orchestration.
 //!
-//! Application restore (launching processes, placing windows) is M2/M3 work that does
-//! not exist yet. This is the browser path: build a `restore_session` payload from a
-//! snapshot and hand it to the extension, which decides what is actually missing.
+//! Two halves that deliberately work differently:
 //!
-//! The division of labour matters. The agent says *what the session was*; the
-//! extension says *what is missing right now*, because only it can see what the
-//! browser already reopened by itself (docs/04-restore.md).
+//! - **Browsers** ([`build_payload`]): the agent says what the session *was* and the
+//!   extension decides what is missing, because only it can see what the browser
+//!   already reopened by itself.
+//! - **Applications** ([`apps`]): the agent does the work itself, launching processes
+//!   and placing windows, because nothing else can.
+
+pub mod apps;
+pub mod launch;
+pub mod place;
 
 use crate::store::crypto::{aad, open as unseal};
 use crate::store::db::Db;
