@@ -8,6 +8,7 @@ pub mod restore;
 pub mod server;
 pub mod setup;
 pub mod store;
+pub mod watcher;
 
 pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 

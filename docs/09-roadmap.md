@@ -6,15 +6,17 @@
 |---|---|
 | M0 — Walking skeleton | **Done.** Verified against real Edge end to end. |
 | M1 — Capture, tabs, T1 reconcile | **Done** for Chrome/Edge. Live tabs land in SQLite with title, order, active flag, pinned state, and window geometry. |
-| M2 — Apps and windows | Not started. No `EnumWindows` watcher yet. |
+| M2 — Apps and windows | **Capture done.** Apps, windows, geometry, displays, tiers and redacted command lines land in SQLite. Launching them back is still unwritten. |
 | M3 — Restore | **Browser half done.** A reboot cycle restores tabs into a real browser, adding only what is missing. App restore is still M2 work. |
 | M4 — T0 deltas / T2 shutdown | T0 event deltas done. T2 shutdown hook not written. |
 | M5 — Private windows | Storage, crypto, TTL and the chokepoint are done and tested; the **two-stage opt-in has not been exercised with a real private window**. |
 | M6 — Firefox | Builds and manifests exist; **not yet loaded in Firefox**. |
 | M7 — Polish | Not started. No installer, no tray, no review UI. |
 
-Roughly M0, M1, the browser half of M3, and half of M4/M5 are real. The honest summary
-is that **browser sessions survive a reboot; applications do not exist yet**.
+Roughly M0, M1, M2 capture, the browser half of M3, and half of M4/M5 are real. The
+honest summary is that **the session is fully captured, and only browsers are restored
+so far** - the agent knows which applications were open, where, and how to launch them,
+but nothing launches them yet.
 
 ### Verified by running it, not just by tests
 
@@ -27,6 +29,10 @@ is that **browser sessions survive a reboot; applications do not exist yet**.
   left alone, with no duplicates
 - Restored tabs store their real URLs rather than the lazy placeholder, so the session
   survives repeated reboots instead of degrading
+- A live desktop capture: VS Code, File Explorer, Chrome, Firefox, Calculator and
+  Notepad, each with the right tier, env-folded paths, and Store apps carrying the
+  AUMID needed to relaunch them
+- Not one browser window stored a page title, with private windows open at the time
 
 ### Known gaps
 
@@ -38,6 +44,13 @@ is that **browser sessions survive a reboot; applications do not exist yet**.
 - Restore is offered automatically; `restore_mode = ask` is stored and honoured only as
   "off or not", because there is no review UI to ask with.
 - Firefox untested.
+- App capture polls every 60s rather than using `SetWinEventHook`, so window moves take
+  up to a minute to register. Event hooks are an optimization on a pass that is now
+  known-correct.
+- Command lines come from a PEB read. ETW (the intended primary source) is not wired
+  up, so processes are read one at a time rather than cached as they start.
+- Virtual desktop membership is not captured; see [08](08-agent.md) for why the public
+  API is not enough.
 
 ## Build order
 

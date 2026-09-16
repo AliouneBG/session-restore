@@ -25,6 +25,7 @@ USAGE:
   sr-agent --install [IDS]      Register native messaging hosts for all browsers
   sr-agent --uninstall          Remove registrations and manifests
   sr-agent --status             Show registration and database status
+  sr-agent --capture            Run one application/window capture pass and print it
 
 INSTALL OPTIONS:
   --chrome-id=<ID>    Chrome/Edge extension ID. Repeatable.
@@ -49,6 +50,8 @@ fn main() {
         cmd_uninstall()
     } else if args.iter().any(|a| a == "--status") {
         cmd_status()
+    } else if args.iter().any(|a| a == "--capture") {
+        cmd_capture()
     } else {
         run()
     };
@@ -181,6 +184,72 @@ fn cmd_status() -> Result<()> {
     Ok(())
 }
 
+fn cmd_capture() -> Result<()> {
+    let dir = data_dir()?;
+    let db = Db::open(&dir.join("sessions.db"))?;
+    let stats = sr_agent::watcher::capture_into_live(&db)?;
+    println!(
+        "Captured {} apps, {} windows, {} displays",
+        stats.apps, stats.windows, stats.displays
+    );
+
+    println!();
+    println!("{:<6} {:<26} {:<7} {}", "TIER", "APP", "WINDOWS", "PATH");
+    let mut stmt = db.conn.prepare(
+        "SELECT a.restore_tier, a.display_name, a.exe_path, a.aumid, a.is_browser,
+                (SELECT COUNT(*) FROM windows w
+                 WHERE w.snapshot_id = a.snapshot_id AND w.app_key = a.app_key)
+         FROM apps a WHERE a.snapshot_id = ?1
+         ORDER BY a.restore_tier, a.display_name",
+    )?;
+    let rows = stmt.query_map([sr_agent::store::db::LIVE], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, Option<String>>(3)?,
+            r.get::<_, i64>(4)?,
+            r.get::<_, i64>(5)?,
+        ))
+    })?;
+    for row in rows.flatten() {
+        let (tier, name, exe, aumid, is_browser, windows) = row;
+        let label = name.unwrap_or_else(|| "?".into());
+        let path = exe.or(aumid).unwrap_or_else(|| "-".into());
+        let marker = if is_browser != 0 { " [browser]" } else { "" };
+        println!("{tier:<6} {label:<26}{marker} {windows:<7} {path}");
+    }
+    drop(stmt);
+
+    println!();
+    let mut stmt = db.conn.prepare(
+        "SELECT friendly_name, is_primary, bounds_w, bounds_h, dpi
+         FROM displays WHERE snapshot_id = ?1",
+    )?;
+    for row in stmt
+        .query_map([sr_agent::store::db::LIVE], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?
+        .flatten()
+    {
+        println!(
+            "display {} {}x{} @ {}dpi{}",
+            row.0.unwrap_or_default(),
+            row.2,
+            row.3,
+            row.4,
+            if row.1 != 0 { " (primary)" } else { "" }
+        );
+    }
+    Ok(())
+}
+
 fn run() -> Result<()> {
     init_logging();
     tracing::info!(version = AGENT_VERSION, "starting");
@@ -243,6 +312,38 @@ fn run() -> Result<()> {
             Ok(n) if n > 0 => tracing::info!(count = n, "swept expired private rows"),
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %e, "sweep failed"),
+        }
+    });
+
+    // Periodic application capture, the desktop equivalent of the browser's reconcile.
+    //
+    // Polling rather than SetWinEventHook for now: a 60s sweep bounds staleness the
+    // same way the browser's does, and it is the same interval the whole design is
+    // already built around. Event hooks are an optimization on top (docs/03-capture.md),
+    // and adding them before the polled pass is known-correct would make failures
+    // harder to attribute.
+    let capturer = Arc::clone(&shared);
+    let capture_interval = {
+        let db = capturer.db.lock().unwrap();
+        Duration::from_secs(db.setting_i64("reconcile_interval_seconds", 60).max(15) as u64)
+    };
+    std::thread::spawn(move || {
+        loop {
+            {
+                let db = capturer.db.lock().unwrap();
+                match sr_agent::watcher::capture_into_live(&db) {
+                    Ok(s) => tracing::debug!(
+                        apps = s.apps,
+                        windows = s.windows,
+                        displays = s.displays,
+                        "captured desktop"
+                    ),
+                    // Enumeration touching dozens of processes will occasionally lose a
+                    // race with one exiting. Never fatal.
+                    Err(e) => tracing::warn!(error = %e, "desktop capture failed"),
+                }
+            }
+            std::thread::sleep(capture_interval);
         }
     });
 
