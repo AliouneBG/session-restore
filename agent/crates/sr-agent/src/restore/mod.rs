@@ -218,12 +218,45 @@ pub fn build_private_payload(
     })
 }
 
+/// How long after a restore begins that further runs count as the same episode.
+///
+/// One restore is several runs: the applications, then each browser as it connects.
+/// They share an undo point (see [`begin_run`]), and this bounds "share" to the span
+/// an episode actually takes - a browser the restore itself launched, connecting a few
+/// seconds later, not one the user opens twenty minutes afterwards.
+const UNDO_EPISODE_MILLIS: i64 = 5 * 60 * 1000;
+
 /// Opens a restore run, recording the undo point.
+///
+/// Runs that belong to the same restore **share one undo point**, and that sharing is
+/// the whole reason this is not just an INSERT. A restore is not one call: the review
+/// window restores the applications, then every browser calls this again as it
+/// connects. Taking a fresh `pre_restore` snapshot each time meant the newest one -
+/// the one `--undo` reaches for - was captured *after* the applications had already
+/// been launched, so undoing returned you to the state the restore had just created.
+/// Undo was a no-op in exactly the case it exists for.
 pub fn begin_run(db: &Db, snapshot_id: i64, mode: &str) -> Result<i64> {
     // Snapshot the current session first, so a restore is always undoable
     // (docs/04-restore.md). Failing to create one is not fatal - there may be nothing
     // open yet - but it is recorded as absent rather than silently assumed.
-    let undo = crate::store::snapshot::create_from_live(db, "pre_restore", Some("before restore"))?;
+    let recent: Option<i64> = db
+        .conn
+        .query_row(
+            "SELECT undo_snapshot_id FROM restore_runs
+             WHERE snapshot_id = ?1 AND undo_snapshot_id IS NOT NULL
+               AND started_at >= ?2
+             ORDER BY started_at DESC LIMIT 1",
+            rusqlite::params![snapshot_id, sr_proto::now_millis() - UNDO_EPISODE_MILLIS],
+            |r| r.get(0),
+        )
+        .ok();
+
+    let undo = match recent {
+        Some(id) => Some(id),
+        None => {
+            crate::store::snapshot::create_from_live(db, "pre_restore", Some("before restore"))?
+        }
+    };
 
     db.conn.execute(
         "INSERT INTO restore_runs (snapshot_id, started_at, mode, undo_snapshot_id)
@@ -231,6 +264,38 @@ pub fn begin_run(db: &Db, snapshot_id: i64, mode: &str) -> Result<i64> {
         rusqlite::params![snapshot_id, sr_proto::now_millis(), mode, undo],
     )?;
     Ok(db.conn.last_insert_rowid())
+}
+
+/// Records what an application restore actually did, and closes the run.
+///
+/// The counterpart to [`apply_result`] for the half of a restore the agent performs
+/// itself. Without it a run that launched applications finished with no `finished_at`
+/// and no items, so "what did that restore do?" had only the log to answer it.
+pub fn record_app_outcomes(db: &Db, run_id: i64, report: &apps::AppRestoreReport) -> Result<()> {
+    let mut rows: Vec<(&str, &str, Option<&str>)> = Vec::new();
+    for name in &report.launched {
+        rows.push((name.as_str(), "launched", None));
+    }
+    for (name, why) in &report.skipped {
+        rows.push((name.as_str(), "skipped", Some(why.as_str())));
+    }
+    for (name, why) in &report.failed {
+        rows.push((name.as_str(), "failed", Some(why.as_str())));
+    }
+
+    for (key, status, detail) in rows {
+        db.conn.execute(
+            "INSERT OR REPLACE INTO restore_items (run_id, item_kind, item_key, status, detail)
+             VALUES (?1, 'app', ?2, ?3, ?4)",
+            rusqlite::params![run_id, key, status, detail],
+        )?;
+    }
+
+    db.conn.execute(
+        "UPDATE restore_runs SET finished_at = ?1 WHERE id = ?2",
+        rusqlite::params![sr_proto::now_millis(), run_id],
+    )?;
+    Ok(())
 }
 
 pub fn record_items(db: &Db, run_id: i64, body: &RestoreSessionBody) -> Result<()> {

@@ -416,3 +416,134 @@ fn with_no_review_answer_the_whole_session_is_offered() {
     let offer = recv(&mut c);
     assert_eq!(offer.body["windows"][0]["tabs"].as_array().unwrap().len(), 2);
 }
+
+/// The defect this pins: a restore is several runs (the applications from the review
+/// window, then each browser as it connects), and each one used to take its own
+/// `pre_restore` snapshot. `--undo` reads the newest run, so it read an undo point
+/// captured *after* the restore had already launched everything - undoing returned you
+/// to the state the restore had just produced.
+#[test]
+fn every_run_in_one_restore_shares_the_undo_point() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    let snapshot_id = {
+        let db = h.shared.db.lock().unwrap();
+        db.conn
+            .query_row(
+                "SELECT id FROM snapshots WHERE kind = 'shutdown' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+
+    let db = h.shared.db.lock().unwrap();
+    live_tab(&db, "w-now:t1");
+
+    let first = sr_agent::restore::begin_run(&db, snapshot_id, "ask").unwrap();
+    let second = sr_agent::restore::begin_run(&db, snapshot_id, "ask").unwrap();
+    let third = sr_agent::restore::begin_run(&db, snapshot_id, "ask").unwrap();
+    assert_ne!(first, second, "each run is still its own row");
+
+    let undo_of = |id: i64| -> Option<i64> {
+        db.conn
+            .query_row(
+                "SELECT undo_snapshot_id FROM restore_runs WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert!(undo_of(first).is_some(), "the first run must record an undo point");
+    assert_eq!(undo_of(first), undo_of(second));
+    assert_eq!(undo_of(first), undo_of(third));
+
+    let pre: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM snapshots WHERE kind = 'pre_restore'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(pre, 1, "one restore must leave one undo point, not one per run");
+}
+
+/// A restore for a *different* snapshot is a different restore, even moments later.
+#[test]
+fn a_separate_restore_gets_its_own_undo_point() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    let db = h.shared.db.lock().unwrap();
+
+    // The harness reaps live state, and an undo point can only be made from something.
+    live_tab(&db, "w-now:t1");
+
+    let first = sr_agent::restore::begin_run(&db, 1, "manual").unwrap();
+    let second = sr_agent::restore::begin_run(&db, 2, "manual").unwrap();
+
+    let undo_of = |id: i64| -> Option<i64> {
+        db.conn
+            .query_row(
+                "SELECT undo_snapshot_id FROM restore_runs WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_ne!(undo_of(first), undo_of(second));
+}
+
+/// Outcomes of the agent-side half of a restore are recorded, and the run is closed.
+#[test]
+fn an_application_restore_records_what_it_did() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    let db = h.shared.db.lock().unwrap();
+    live_tab(&db, "w-now:t1");
+    let run_id = sr_agent::restore::begin_run(&db, 1, "manual").unwrap();
+
+    let report = sr_agent::restore::apps::AppRestoreReport {
+        launched: vec!["Notepad".into()],
+        skipped: vec![("Code".into(), "already running".into())],
+        failed: vec![("Figma".into(), "not installed".into())],
+        placed: 1,
+    };
+    sr_agent::restore::record_app_outcomes(&db, run_id, &report).unwrap();
+
+    let mut stmt = db
+        .conn
+        .prepare("SELECT item_key, status, detail FROM restore_items WHERE run_id = ?1 AND item_kind = 'app' ORDER BY item_key")
+        .unwrap();
+    let rows: Vec<(String, String, Option<String>)> = stmt
+        .query_map([run_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    drop(stmt);
+
+    assert_eq!(
+        rows,
+        vec![
+            ("Code".into(), "skipped".into(), Some("already running".into())),
+            ("Figma".into(), "failed".into(), Some("not installed".into())),
+            ("Notepad".into(), "launched".into(), None),
+        ]
+    );
+
+    let finished: Option<i64> = db
+        .conn
+        .query_row("SELECT finished_at FROM restore_runs WHERE id = ?1", [run_id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(finished.is_some(), "recording outcomes closes the run");
+}
+
+/// Puts one tab in live state. `create_from_live` counts tabs and applications, so
+/// without one there is nothing to snapshot and no undo point to compare.
+fn live_tab(db: &Db, tab_key: &str) {
+    db.conn
+        .execute(
+            "INSERT OR REPLACE INTO tabs (snapshot_id, tab_key, browser_window_id, tab_index,
+             url, title, pinned, active, muted, restorable, updated_at)
+             VALUES (0, ?1, 'w-now', 0, 'https://now.test/', 'now', 0, 1, 0, 1, 0)",
+            [tab_key],
+        )
+        .unwrap();
+}

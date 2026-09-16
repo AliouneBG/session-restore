@@ -285,7 +285,7 @@ fn apply_choice(
     let selected: std::collections::HashSet<&str> =
         choice.apps.iter().map(|s| s.as_str()).collect();
 
-    let (apps, displays) = {
+    let (apps, displays, run_id) = {
         let db = db.lock().unwrap();
         let all = match crate::restore::apps::plan_from_snapshot(&db, snapshot_id) {
             Ok(a) => a,
@@ -298,17 +298,44 @@ fn apply_choice(
             .into_iter()
             .filter(|a| selected.contains(a.app_key.as_str()))
             .collect();
-        let displays = crate::watcher::displays::enumerate().unwrap_or_default();
-        (picked, displays)
-    };
+        if picked.is_empty() {
+            tracing::info!("no applications selected");
+            return;
+        }
 
-    if apps.is_empty() {
-        tracing::info!("no applications selected");
-        return;
-    }
+        // The undo point, and it has to be taken here rather than left to the browser
+        // half. This path used to launch applications without opening a run at all, so
+        // a restore answered in the review window was the one restore `--undo` could
+        // not reverse: with no run of its own it reached back to whatever ran last,
+        // and "undo" meant restoring some older session over the top of this one.
+        //
+        // Capture first: the undo point is what is on screen *now*, and the periodic
+        // sweep may be up to a minute stale, which at startup is exactly the minute
+        // in which the review window is answered.
+        if let Err(e) = crate::watcher::capture_into_live(&db) {
+            tracing::warn!(error = %e, "capture before restore failed; undo point may be stale");
+        }
+        // "ask" and not a mode of its own: `restore_runs.mode` records how the
+        // restore was decided, and the review window is what asking looks like.
+        // It also keeps one episode's rows consistent - the browser half passes
+        // the same setting value when it connects a moment later.
+        let run_id = match crate::restore::begin_run(&db, snapshot_id, "ask") {
+            Ok(id) => id,
+            Err(e) => {
+                // Without a run there is no undo, and silently restoring anyway would
+                // hand the user an irreversible change they had no way to know about.
+                tracing::error!(error = %e, "could not open a restore run; not restoring");
+                return;
+            }
+        };
+
+        let displays = crate::watcher::displays::enumerate().unwrap_or_default();
+        (picked, displays, run_id)
+    };
 
     // Launching blocks on staggered sleeps, so it runs off the UI thread; holding the
     // message pump would freeze the tray for the duration.
+    let db = Arc::clone(db);
     std::thread::spawn(move || {
         let report = crate::restore::apps::restore_apps(&apps, &displays, false);
         tracing::info!(
@@ -317,6 +344,11 @@ fn apply_choice(
             failed = report.failed.len(),
             "restore finished"
         );
+
+        let db = db.lock().unwrap();
+        if let Err(e) = crate::restore::record_app_outcomes(&db, run_id, &report) {
+            tracing::warn!(error = %e, "could not record restore outcomes");
+        }
     });
 }
 
