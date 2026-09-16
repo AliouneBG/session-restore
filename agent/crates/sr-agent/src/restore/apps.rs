@@ -34,6 +34,8 @@ pub struct PlannedApp {
     pub command_line: Option<String>,
     pub working_dir: Option<String>,
     pub is_browser: bool,
+    /// Documents to reopen for a tier C restore.
+    pub documents: Vec<String>,
     pub windows: Vec<PlannedWindow>,
 }
 
@@ -62,7 +64,7 @@ pub struct AppRestoreReport {
 pub fn plan_from_snapshot(db: &Db, snapshot_id: i64) -> Result<Vec<PlannedApp>> {
     let mut stmt = db.conn.prepare(
         "SELECT app_key, display_name, kind, restore_tier, exe_path, aumid, command_line,
-                working_dir, is_browser
+                working_dir, is_browser, documents
          FROM apps WHERE snapshot_id = ?1 AND is_browser = 0
          ORDER BY restore_tier, display_name",
     )?;
@@ -85,6 +87,10 @@ pub fn plan_from_snapshot(db: &Db, snapshot_id: i64) -> Result<Vec<PlannedApp>> 
                 command_line: r.get(6)?,
                 working_dir: r.get(7)?,
                 is_browser: r.get::<_, i64>(8)? != 0,
+                documents: r
+                    .get::<_, Option<String>>(9)?
+                    .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
+                    .unwrap_or_default(),
                 windows: Vec::new(),
             })
         })?
@@ -161,6 +167,26 @@ pub fn restore_apps(
         }
 
         let result = match (app.tier, app.kind.as_str()) {
+            // Tier C: reopen the documents and let the shell pick the handler. That is
+            // what "restore what I was working on" means when the command line is
+            // unusable but we still know which files were open.
+            (Tier::C, _) if !app.documents.is_empty() => {
+                let mut opened = 0usize;
+                let mut last_err = None;
+                for doc in &app.documents {
+                    match launch::launch_via_shell(doc) {
+                        Ok(_) => opened += 1,
+                        Err(e) => last_err = Some(e),
+                    }
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                if opened > 0 {
+                    Ok(launch::Launched { pid: None })
+                } else {
+                    // Every document failed - the file was moved or deleted since.
+                    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no documents could be opened")))
+                }
+            }
             (Tier::A, _) => match &app.command_line {
                 Some(cmd) => launch::launch_with_command_line(cmd, app.working_dir.as_deref()),
                 // Tier A without a command line should not happen, but falling back is
@@ -310,6 +336,7 @@ mod tests {
             command_line: Some(format!(r"C:\Apps\{name}.exe")),
             working_dir: None,
             is_browser: false,
+            documents: vec![],
             windows: vec![],
         }
     }

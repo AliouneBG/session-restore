@@ -9,7 +9,7 @@
 | M2 — Apps and windows | **Done.** Apps, windows, geometry, displays, tiers and redacted command lines land in SQLite. |
 | M3 — Restore | **Done.** Browsers get their missing tabs back; applications are relaunched by tier and their windows placed, including across a changed monitor layout or DPI. No review UI, so app restore is opt-in. |
 | M4 — T0 deltas / T2 shutdown | **Done.** Event deltas plus a `WM_QUERYENDSESSION` flush bounded at 2s. |
-| M5 — Private windows | **Storage, crypto, TTL, chokepoint and the refusal path are verified.** The one step never exercised is a private tab flowing from a real private window, which needs a browser permission that cannot be scripted - see below. |
+| M5 — Private windows | **Done and verified with real private windows in Chrome and Edge.** |
 | M6 — Firefox | **Done.** Runs in Firefox, connects, captures. AMO lint clean: 0 errors, 0 warnings, 0 notices. |
 | M7 — Polish | **Tray, review window and logon task done.** No MSI/MSIX installer yet, and nothing is signed. |
 
@@ -42,6 +42,13 @@ listed below.
   browser permission absent, the extension reported `incognito_access=false` and
   captured zero private tabs
 - The review window renders the real session with per-app checkboxes and honest tiers
+- Private windows captured for real in **both Chrome and Edge**: the extension reported
+  `incognito_access=false`, then `true` after the browser permission was granted, and
+  two encrypted rows appeared from two different browsers
+- The privacy scan run against that real data, with a control: it **finds** the
+  plaintext normal-tab URLs in `sessions.db` and finds **zero** private ones
+- Document restore: Notepad closed, restored from a snapshot, and the document reopened
+  (window titled `sr-tier-c-demo.txt - Notepad`)
 - Closing Calculator and Notepad, then restoring: both relaunched through
   IApplicationActivationManager
 - Window placement round-trip: a window at 116,129 (689x489) was moved to 40,40
@@ -55,11 +62,9 @@ listed below.
   so SmartScreen will warn on another machine.
 - On the GNU toolchain the agent needs `WebView2Loader.dll` beside it (the build
   places it there automatically). An MSVC build links it statically and needs no DLL.
-- Restore does not yet reopen documents (tier C is planned but unused), and window
-  z-order and focus are not restored.
-- App capture polls every 60s rather than using `SetWinEventHook`, so window moves take
-  up to a minute to register. Event hooks are an optimization on a pass that is now
-  known-correct.
+- Window z-order and focus are not restored.
+- Document resolution needs the file to be in Windows Recent. A document opened in a
+  way that never touches Recent will not be found, and no path is ever guessed.
 - `--undo` re-places the previous windows but never closes what a restore opened.
   Closing applications to undo risks destroying work done since, which is worse than a
   few extra windows.

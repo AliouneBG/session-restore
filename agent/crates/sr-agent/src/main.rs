@@ -56,6 +56,8 @@ fn main() {
         cmd_uninstall(&args)
     } else if args.iter().any(|a| a == "--status") {
         cmd_status()
+    } else if args.iter().any(|a| a == "--documents") {
+        cmd_documents()
     } else if args.iter().any(|a| a == "--capture") {
         cmd_capture()
     } else if args.iter().any(|a| a == "--restore-apps") {
@@ -314,6 +316,30 @@ fn cmd_status() -> Result<()> {
         }
     } else {
         println!("Database:        not created yet");
+    }
+    Ok(())
+}
+
+/// Diagnostic: show how window titles resolve to documents.
+fn cmd_documents() -> Result<()> {
+    let index = sr_agent::watcher::documents::recent_index();
+    println!("Recent index: {} entries", index.len());
+    for (name, path) in index.iter().take(8) {
+        println!("   {name}  ->  {}", path.display());
+    }
+    println!();
+
+    let found = sr_agent::watcher::windows::enumerate()?;
+    println!("Window titles and what they resolve to:");
+    for w in &found {
+        let Some(title) = w.title.as_deref() else {
+            continue;
+        };
+        let cands = sr_agent::watcher::documents::candidates_from_title(title);
+        let resolved = sr_agent::watcher::documents::resolve_from_title(title, &index);
+        println!("   {title:?}");
+        println!("      candidates: {cands:?}");
+        println!("      resolved:   {resolved:?}");
     }
     Ok(())
 }

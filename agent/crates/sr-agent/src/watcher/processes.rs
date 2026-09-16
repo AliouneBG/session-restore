@@ -12,6 +12,13 @@ pub struct ProcessInfo {
     /// Redacted, and only for applications whose arguments change the outcome.
     pub command_line: Option<String>,
     pub command_line_redacted: bool,
+    /// Documents the application had open.
+    ///
+    /// Extracted from the *raw* command line before redaction, then filtered to paths
+    /// that actually exist. The raw line never leaves this function, so a token in it
+    /// cannot reach storage this way - and a secret is not a path on disk, so the
+    /// existence check drops it anyway.
+    pub documents: Vec<String>,
     pub elevated: bool,
 }
 
@@ -76,17 +83,24 @@ pub fn info_for_pid(pid: u32) -> Result<ProcessInfo> {
 
         // Collect arguments only where they change what comes back. Collecting less is
         // stronger than redacting more (docs/06-privacy-security.md).
-        let (command_line, command_line_redacted) = match &exe_path {
+        let (command_line, command_line_redacted, documents) = match &exe_path {
             Some(p) if identity::arguments_matter(p) => match read_command_line(pid) {
                 Ok(raw) => {
+                    let docs = identity::extract_documents(&raw);
                     let (red, was) = identity::redact_command_line(&raw);
-                    (Some(red), was)
+                    (Some(red), was, docs)
                 }
                 // Unreadable is recorded as absent, never guessed at; the app simply
                 // drops to tier B.
-                Err(_) => (None, false),
+                Err(_) => (None, false, Vec::new()),
             },
-            _ => (None, false),
+            // Even for apps whose arguments we do not keep, a document path is worth
+            // having: it is what turns an empty relaunch into reopening the file.
+            Some(_) => match read_command_line(pid) {
+                Ok(raw) => (None, false, identity::extract_documents(&raw)),
+                Err(_) => (None, false, Vec::new()),
+            },
+            _ => (None, false, Vec::new()),
         };
 
         Ok(ProcessInfo {
@@ -96,6 +110,7 @@ pub fn info_for_pid(pid: u32) -> Result<ProcessInfo> {
             aumid,
             command_line,
             command_line_redacted,
+            documents,
             elevated,
         })
     }
@@ -290,6 +305,7 @@ pub fn info_for_pid(pid: u32) -> Result<ProcessInfo> {
         aumid: None,
         command_line: None,
         command_line_redacted: false,
+        documents: Vec::new(),
         elevated: false,
     })
 }

@@ -55,6 +55,34 @@ pub fn run_app(ctx: UiContext) -> Result<()> {
     };
     let tray = tray::Tray::new(capture_enabled)?;
 
+    // Window event hooks need a message pump, which is this thread. The capture they
+    // trigger does not, so it runs on a worker - a capture pass walks every process on
+    // the machine and must never block the tray.
+    match crate::watcher::events::install() {
+        Ok(rx) => {
+            let db = Arc::clone(&ctx.db);
+            std::thread::spawn(move || {
+                while rx.recv().is_ok() {
+                    let db = db.lock().unwrap();
+                    if !db.setting_bool("capture_enabled", true) {
+                        continue;
+                    }
+                    match crate::watcher::capture_into_live(&db) {
+                        Ok(s) => tracing::debug!(
+                            apps = s.apps,
+                            windows = s.windows,
+                            "captured after window events"
+                        ),
+                        Err(e) => tracing::warn!(error = %e, "event-driven capture failed"),
+                    }
+                }
+            });
+            tracing::info!("window event hooks installed");
+        }
+        // Not fatal: the 60s reconcile is the floor on correctness and still runs.
+        Err(e) => tracing::warn!(error = %e, "could not install window event hooks"),
+    }
+
     // Held across iterations. Dropping the pair closes the window.
     let mut review_window: Option<(tao::window::Window, wry::WebView)> = None;
     let mut review_snapshot: Option<i64> = None;

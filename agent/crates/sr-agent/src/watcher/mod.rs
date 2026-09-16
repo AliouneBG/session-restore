@@ -4,6 +4,8 @@
 //! See docs/03-capture.md.
 
 pub mod displays;
+pub mod documents;
+pub mod events;
 pub mod identity;
 pub mod processes;
 pub mod windows;
@@ -11,7 +13,7 @@ pub mod windows;
 use crate::store::db::{Db, LIVE};
 use anyhow::Result;
 use identity::{assign_tier, TierInput};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CaptureStats {
@@ -28,6 +30,10 @@ pub struct CaptureStats {
 pub fn capture_into_live(db: &Db) -> Result<CaptureStats> {
     let found = windows::enumerate()?;
     let monitors = displays::enumerate()?;
+
+    // Built once per pass rather than per window: it reads a few hundred shortcuts,
+    // which is cheap once and wasteful forty times.
+    let recent = documents::recent_index();
     let now = sr_proto::now_millis();
 
     let never_restore: HashSet<String> = {
@@ -67,6 +73,34 @@ pub fn capture_into_live(db: &Db) -> Result<CaptureStats> {
         )?;
     }
 
+    // Documents are collected across ALL of an application's windows before its row is
+    // written. Taking them from whichever window happened to come first meant an app
+    // with three windows recorded documents only if the first one had a resolvable
+    // title - Notepad with three notes open would record none.
+    let mut docs_by_app: HashMap<String, Vec<String>> = HashMap::new();
+    for w in &found {
+        if w.is_browser {
+            continue;
+        }
+        let p = &w.process;
+        let key = identity::app_key(p.kind, p.exe_path.as_deref(), p.aumid.as_deref());
+        let entry = docs_by_app.entry(key).or_default();
+
+        for d in &p.documents {
+            if !entry.contains(d) {
+                entry.push(d.clone());
+            }
+        }
+        if let Some(title) = w.title.as_deref() {
+            if let Some(path) = documents::resolve_from_title(title, &recent) {
+                let folded = identity::fold_env(&path.display().to_string());
+                if !entry.contains(&folded) {
+                    entry.push(folded);
+                }
+            }
+        }
+    }
+
     let mut seen_apps: HashSet<String> = HashSet::new();
     let mut seen_windows: HashSet<String> = HashSet::new();
     let mut stats = CaptureStats {
@@ -79,6 +113,10 @@ pub fn capture_into_live(db: &Db) -> Result<CaptureStats> {
         let exe = p.exe_path.as_deref();
         let key = identity::app_key(p.kind, exe, p.aumid.as_deref());
 
+        // Gathered in the pass above, across every window this app owns.
+        let empty: Vec<String> = Vec::new();
+        let documents = docs_by_app.get(&key).unwrap_or(&empty);
+
         let tier = assign_tier(&TierInput {
             kind: p.kind,
             exe_path: exe,
@@ -87,17 +125,19 @@ pub fn capture_into_live(db: &Db) -> Result<CaptureStats> {
             command_line_redacted: p.command_line_redacted,
             elevated: p.elevated,
             never_restore: exe.map(|e| never_restore.contains(e)).unwrap_or(false),
+            has_documents: !documents.is_empty(),
         });
 
         if seen_apps.insert(key.clone()) {
             db.conn.execute(
                 "INSERT INTO apps (snapshot_id, app_key, kind, exe_path, aumid, display_name,
-                    command_line, is_browser, restore_tier)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                    command_line, documents, is_browser, restore_tier)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
                  ON CONFLICT(snapshot_id, app_key) DO UPDATE SET
                    exe_path = excluded.exe_path, aumid = excluded.aumid,
                    display_name = excluded.display_name,
                    command_line = excluded.command_line,
+                   documents = excluded.documents,
                    is_browser = excluded.is_browser,
                    restore_tier = excluded.restore_tier",
                 rusqlite::params![
@@ -111,6 +151,11 @@ pub fn capture_into_live(db: &Db) -> Result<CaptureStats> {
                         .file_stem()
                         .map(|s| s.to_string_lossy().to_string())),
                     p.command_line,
+                    if documents.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(documents).ok()
+                    },
                     w.is_browser,
                     tier.as_str(),
                 ],

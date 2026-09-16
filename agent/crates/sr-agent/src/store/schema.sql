@@ -61,6 +61,10 @@ CREATE TABLE IF NOT EXISTS apps (
   icon_hash    TEXT,
   command_line TEXT,
   working_dir  TEXT,
+  -- JSON array of env-folded paths the app had open. Sourced from the command line,
+  -- which is the only place a *full* path appears reliably; window titles usually
+  -- show a bare filename and guessing its directory would reopen the wrong file.
+  documents    TEXT,
   is_browser   INTEGER NOT NULL DEFAULT 0,
   restore_tier TEXT NOT NULL CHECK (restore_tier IN ('A','B','C','D')),
   PRIMARY KEY (snapshot_id, app_key)

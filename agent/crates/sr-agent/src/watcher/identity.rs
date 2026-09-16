@@ -199,11 +199,25 @@ pub fn is_browser_exe(exe_path: &str) -> bool {
 /// The decision is made from the *process*, never by pattern-matching the title for
 /// markers like "Private Browsing": those are localized, differ per browser, and any
 /// page can set `document.title` to whatever it likes.
+/// Also returns `None` for a title that does not name a file.
+///
+/// Window titles are not always metadata. Windows 11 Notepad puts the first line of
+/// *unsaved content* in the title, so an untitled note about something private ends up
+/// looking like an innocuous window title. A real capture on this machine produced
+/// exactly that.
+///
+/// Only titles naming a document are kept. Those are the useful ones - they say which
+/// window is which - and the safe ones, since the filename is already recorded as a
+/// document. Nothing consumes raw titles, and collecting less is stronger than
+/// redacting more.
 pub fn storable_title(exe_path: &str, title: &str) -> Option<String> {
     if is_browser_exe(exe_path) {
         return None;
     }
     if title.is_empty() {
+        return None;
+    }
+    if crate::watcher::documents::candidates_from_title(title).is_empty() {
         return None;
     }
     Some(title.to_string())
@@ -330,6 +344,50 @@ pub fn arguments_matter(exe_path: &str) -> bool {
     )
 }
 
+
+/// Extracts the documents an application was opened with.
+///
+/// The command line is the only source that gives a *full path* reliably. Window
+/// titles usually show a bare filename ("report.docx - Word"), and guessing a
+/// directory for it would reopen the wrong file, which is worse than reopening
+/// nothing.
+///
+/// An argument counts as a document when it is not a flag and it exists on disk at
+/// capture time. Existence is the test that keeps switch values (`--profile-directory=x`)
+/// and URLs out.
+pub fn extract_documents(cmd: &str) -> Vec<String> {
+    let mut out = Vec::new();
+
+    for (i, arg) in split_args(cmd).into_iter().enumerate() {
+        // The first token is the executable, not a document.
+        if i == 0 {
+            continue;
+        }
+        let trimmed = arg.trim_matches('"');
+        if trimmed.is_empty() || trimmed.starts_with('-') || trimmed.starts_with('/') {
+            continue;
+        }
+        // A redaction sentinel is not a path, and must never be treated as one.
+        if trimmed.contains("<redacted:") {
+            continue;
+        }
+        // Needs to look like a path at all: a drive letter or a UNC prefix.
+        let looks_like_path = trimmed.len() > 2
+            && (trimmed.as_bytes()[1] == b':' || trimmed.starts_with(r"\\"));
+        if !looks_like_path {
+            continue;
+        }
+        if std::path::Path::new(trimmed).exists() {
+            let folded = fold_env(trimmed);
+            if !out.contains(&folded) {
+                out.push(folded);
+            }
+        }
+    }
+
+    out
+}
+
 pub struct TierInput<'a> {
     pub kind: AppKind,
     pub exe_path: Option<&'a str>,
@@ -338,6 +396,8 @@ pub struct TierInput<'a> {
     pub command_line_redacted: bool,
     pub elevated: bool,
     pub never_restore: bool,
+    /// Documents this application had open, if any are known.
+    pub has_documents: bool,
 }
 
 pub fn assign_tier(i: &TierInput) -> Tier {
@@ -349,10 +409,16 @@ pub fn assign_tier(i: &TierInput) -> Tier {
     }
     match i.kind {
         AppKind::Uwp => {
-            if i.aumid.is_some() {
-                Tier::B
-            } else {
+            if i.aumid.is_none() {
                 Tier::D
+            } else if i.has_documents {
+                // A packaged app is launched by activation and never receives a path
+                // on its command line, so reopening the document through the shell is
+                // the *only* way to bring back what was actually open. Launching the
+                // app empty would technically succeed and restore nothing.
+                Tier::C
+            } else {
+                Tier::B
             }
         }
         AppKind::Unknown => Tier::D,
@@ -365,6 +431,11 @@ pub fn assign_tier(i: &TierInput) -> Tier {
             }
             if i.has_command_line && !i.command_line_redacted {
                 Tier::A
+            } else if i.has_documents {
+                // The command line is unusable, but we know what was open. Reopening
+                // the documents and letting the shell pick the handler restores more
+                // of the session than launching the app empty.
+                Tier::C
             } else {
                 Tier::B
             }
@@ -375,6 +446,9 @@ pub fn assign_tier(i: &TierInput) -> Tier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const NOTEPAD: &str = "C:/x/Notepad.exe";
+    const DISCORD: &str = "C:/x/Discord.exe";
 
     #[test]
     fn folds_known_prefixes() {
@@ -444,6 +518,41 @@ mod tests {
         assert_eq!(
             storable_title(r"C:\...\msedge.exe", "Something - Profile 1 - Microsoft Edge"),
             None
+        );
+    }
+
+    #[test]
+    fn an_unsaved_note_is_not_stored_as_a_window_title() {
+        // Windows 11 Notepad puts the first line of unsaved content in the title, so
+        // "window title" can quietly mean "the contents of a private note".
+        assert_eq!(storable_title(NOTEPAD, "*-Learned he was obese and prediabet"), None);
+        assert_eq!(storable_title(NOTEPAD, "*httpswww.instagram.comthesomersetdi"), None);
+    }
+
+    #[test]
+    fn ordinary_non_document_titles_are_dropped_too() {
+        // Nothing consumes raw titles, so a title that is not a filename is noise with
+        // a privacy cost attached.
+        assert_eq!(storable_title(DISCORD, "Friends - Discord"), None);
+        assert_eq!(storable_title(DISCORD, "Inbox"), None);
+    }
+
+    #[test]
+    fn a_packaged_app_with_a_document_reopens_the_document() {
+        // Activation never carries a path, so launching the app empty would restore
+        // nothing. The document is the only route back to what was open.
+        assert_eq!(
+            assign_tier(&TierInput {
+                kind: AppKind::Uwp,
+                exe_path: None,
+                aumid: Some("X!App"),
+                has_command_line: false,
+                command_line_redacted: false,
+                elevated: false,
+                never_restore: false,
+                has_documents: true,
+            }),
+            Tier::C
         );
     }
 
@@ -567,7 +676,74 @@ mod tests {
             command_line_redacted: redacted,
             elevated,
             never_restore: false,
+            has_documents: false,
         })
+    }
+
+    fn tier_with_docs(cmd: bool, redacted: bool) -> Tier {
+        assign_tier(&TierInput {
+            kind: AppKind::Win32,
+            exe_path: Some("a.exe"),
+            aumid: None,
+            has_command_line: cmd,
+            command_line_redacted: redacted,
+            elevated: false,
+            never_restore: false,
+            has_documents: true,
+        })
+    }
+
+    #[test]
+    fn known_documents_beat_an_empty_relaunch() {
+        // A redacted command line would launch the app with nothing open. Reopening
+        // the documents restores more of what the user actually had.
+        assert_eq!(tier_with_docs(true, true), Tier::C);
+        assert_eq!(tier_with_docs(false, false), Tier::C);
+    }
+
+    #[test]
+    fn a_clean_command_line_still_wins_over_documents() {
+        // Tier A relaunches the app exactly as it was, documents included.
+        assert_eq!(tier_with_docs(true, false), Tier::A);
+    }
+
+    #[test]
+    fn extracts_documents_that_exist() {
+        let exe = std::env::current_exe().unwrap();
+        let exe = exe.display().to_string();
+        let cmd = format!(r#""C:\Apps\editor.exe" "{exe}" --flag"#);
+        let docs = extract_documents(&cmd);
+        assert_eq!(docs.len(), 1, "got {docs:?}");
+    }
+
+    #[test]
+    fn flags_and_switch_values_are_not_documents() {
+        let cmd = r#"chrome.exe --profile-directory="Profile 1" --no-sandbox"#;
+        assert!(extract_documents(cmd).is_empty());
+    }
+
+    #[test]
+    fn paths_that_no_longer_exist_are_not_documents() {
+        // Recording a path we cannot verify would produce a restore that opens an
+        // error dialog instead of a file.
+        let cmd = r#"editor.exe "C:\definitely
+ot\hereile.txt""#;
+        assert!(extract_documents(cmd).is_empty());
+    }
+
+    #[test]
+    fn a_redaction_sentinel_is_never_treated_as_a_path() {
+        let cmd = r#"app.exe --token=<redacted:12> C:
+ope.txt"#;
+        assert!(extract_documents(cmd).is_empty());
+    }
+
+    #[test]
+    fn the_executable_itself_is_not_a_document() {
+        let exe = std::env::current_exe().unwrap();
+        let exe = exe.display().to_string();
+        let cmd = format!(r#""{exe}""#);
+        assert!(extract_documents(&cmd).is_empty());
     }
 
     #[test]
@@ -608,6 +784,7 @@ mod tests {
                 command_line_redacted: false,
                 elevated: false,
                 never_restore: false,
+                has_documents: false,
             }),
             Tier::D
         );
@@ -624,6 +801,7 @@ mod tests {
                 command_line_redacted: false,
                 elevated: false,
                 never_restore: true,
+                has_documents: false,
             }),
             Tier::D
         );

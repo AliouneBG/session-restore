@@ -58,6 +58,11 @@ impl Db {
             .execute_batch(SCHEMA_SQL)
             .context("applying schema")?;
 
+        // CREATE TABLE IF NOT EXISTS does nothing for a table that already exists, so
+        // columns added after the first release need an explicit ALTER. Adding one
+        // that is already there is an error, not a no-op, hence the check.
+        self.add_column_if_missing("apps", "documents", "TEXT")?;
+
         let existing: Option<String> = self
             .conn
             .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| {
@@ -95,6 +100,21 @@ impl Db {
                 self.seed_settings()?;
                 self.ensure_live_snapshot()?;
             }
+        }
+        Ok(())
+    }
+
+    /// Adds a column when an older database predates it.
+    fn add_column_if_missing(&self, table: &str, column: &str, ty: &str) -> Result<()> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let existing: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .collect();
+        drop(stmt);
+        if !existing.iter().any(|c| c == column) {
+            self.conn
+                .execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty}"))?;
         }
         Ok(())
     }
