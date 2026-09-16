@@ -7,7 +7,7 @@
 | M0 — Walking skeleton | **Done.** Verified against real Edge end to end. |
 | M1 — Capture, tabs, T1 reconcile | **Done** for Chrome/Edge. Live tabs land in SQLite with title, order, active flag, pinned state, and window geometry. |
 | M2 — Apps and windows | **Done.** Apps, windows, geometry, displays, tiers and redacted command lines land in SQLite. |
-| M3 — Restore | **Done.** Browsers get their missing tabs back; applications are relaunched by tier and their windows placed, including across a changed monitor layout or DPI. No review UI, so app restore is opt-in. |
+| M3 — Restore | **Done.** Browsers get their missing tabs back; applications are relaunched by tier and their windows placed, including across a changed monitor layout or DPI. The review window gates both halves, per application, per browser window and per tab. |
 | M4 — T0 deltas / T2 shutdown | **Done.** Event deltas plus a `WM_QUERYENDSESSION` flush bounded at 2s. |
 | M5 — Private windows | **Done and verified with real private windows in Chrome, Edge and Firefox.** |
 | M6 — Firefox | **Done.** Runs in Firefox, connects, captures. AMO lint clean: 0 errors, 0 warnings, 0 notices. |
@@ -53,11 +53,33 @@ listed below.
   IApplicationActivationManager
 - Window placement round-trip: a window at 116,129 (689x489) was moved to 40,40
   (400x300), and restore put it back at exactly 116,129 (689x489)
+- The review window driven end to end through UI Automation, on a session of five
+  applications and three browser windows: three applications and one tab unticked,
+  Restore pressed, and exactly the ticked set came back
+- Per-tab selection honoured across the wire: an Edge window captured with three tabs
+  was offered two after one was unticked, and Edge reopened with those two
+- A browser the restore needed was started by it: Edge was closed at capture time, the
+  restore launched it, its extension connected, and it was handed the offer
+- A browser that connected while the review window was open was made to wait, then
+  handed the answer - the log shows no offer until Restore was pressed
+- Dismissing the review released a waiting browser rather than leaving it waiting
+  forever
+- One restore, one undo point: four runs (the applications, then Chrome, Edge and
+  Firefox as they connected) all recorded `undo_snapshot_id = 6`, and exactly one
+  `pre_restore` snapshot existed
+- `--undo` on a machine where everything was still open: 8 windows re-placed, 0
+  applications launched, and no duplicate process of anything
+- No duplicate tabs on re-restore: every tab already open came back marked `placed`
+  rather than `launched`
+- The private reveal against *copied* rows - the case that was broken: with two private
+  windows captured (Chrome and Firefox), Show decrypted both out of a snapshot and
+  named them, with the TTL shown
+- The privacy scan repeated against that data, control included: it **finds**
+  `rust-lang.org` and `example.com` in `sessions.db`, and finds **zero** traces of
+  either private tab's URL or title anywhere in the data directory
 
 ### Known gaps
 
-- Browser tab restore is still offered whenever `restore_mode` is not `off`, without
-  going through the review window. Only application restore is gated on the review.
 - No installer. The agent runs from its build directory, and nothing is code-signed,
   so SmartScreen will warn on another machine.
 - On the GNU toolchain the agent needs `WebView2Loader.dll` beside it (the build
@@ -68,23 +90,24 @@ listed below.
 - `--undo` re-places the previous windows but never closes what a restore opened.
   Closing applications to undo risks destroying work done since, which is worse than a
   few extra windows.
+- A restore does not put a browser back into the profile it was captured from. It
+  starts the browser, which opens whichever profile that browser opens by default.
+- An application that is already open is placed but not restarted, so one with three
+  stored windows and one open does not get the other two back. Starting it again would
+  not have opened them either, and would have left a duplicate process behind.
 - Command lines come from a PEB read. ETW (the intended primary source) is not wired
   up, so processes are read one at a time rather than cached as they start.
 - Virtual desktop membership is not captured; see [08](08-agent.md) for why the public
   API is not enough.
 
-### The one manual verification left
+### Reproducing the private-window verification
 
-Private-window *capture* has never been exercised with a real private window, because
-the browser-side half of the opt-in cannot be automated: Chromium protects the setting
-with an HMAC over `Secure Preferences`, and Firefox's
-`extensions.allowPrivateBrowsingByDefault` does not apply to temporarily-installed
-add-ons. That resistance is the feature working as intended - it is exactly why the
-permission is meaningful.
-
-Everything either side of that step is verified: the encrypted write, the TTL sweep,
-the purge, the "never appears in any byte on disk" property, and the refusal path when
-the permission is absent. To close the gap by hand:
+This is done - see the verified list above - but it is the one step that cannot be
+automated, so here is how to repeat it. The browser-side half of the opt-in resists
+scripting by design: Chromium protects the setting with an HMAC over
+`Secure Preferences`, and Firefox's `extensions.allowPrivateBrowsingByDefault` does not
+apply to temporarily-installed add-ons. That resistance is the feature working - it is
+exactly why the permission is meaningful.
 
 1. `sr-agent --status` should say `Private capture: on` (set it in the tray/settings first)
 2. Chrome/Edge: extensions page -> Session Restore -> Details -> *Allow in Incognito* /
