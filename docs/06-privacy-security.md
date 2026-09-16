@@ -36,6 +36,11 @@ overstates its protection is worse than one that is clear about its limits.
 | **C3 Sensitive args** | command lines | Plaintext **after redaction** | Yes |
 | **C4 Private browsing** | incognito URLs and titles | **AES-256-GCM** | **Never** |
 
+**A window title can contain document *content*, not just a name.** Windows 11 Notepad
+puts the first line of an unsaved note in its title. Titles are therefore stored only
+when they name a file; anything else is dropped rather than kept as "metadata". See
+[03-capture.md](03-capture.md).
+
 **Window titles are classified by owning process, not by content.** A browser window's
 title is the page title, so it is C2 — or C4 if the window is private. Since the agent
 cannot reliably tell which browser window is private (and must not try to, by

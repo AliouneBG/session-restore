@@ -97,7 +97,17 @@ and the agent half would leak beside it.
 
 **Rule: never store a raw window title for a process identified as a browser.** For
 browser windows, store `title = NULL` and rely on the extension for tab data, which is
-the component that knows what is private. The browser and profile identity is already
+the component that knows what is private.
+
+**And a second rule, learned from a real capture: a window title is not always
+metadata.** Windows 11 Notepad puts the first line of *unsaved content* in the title,
+so an untitled note reads as an innocuous "window title" and gets stored verbatim. A
+capture on the development machine produced exactly that.
+
+Titles are therefore kept only when they name a file. Those are the useful ones - they
+say which window is which - and the safe ones, since the filename is already recorded
+as a document. Everything else is dropped. Nothing consumes raw titles, and collecting
+less is stronger than redacting more. The browser and profile identity is already
 captured in `browser_windows`; the title adds nothing the extension does not supply
 better.
 
@@ -135,6 +145,39 @@ Hook `SetWinEventHook` for:
 Use an out-of-context hook (`WINEVENT_OUTOFCONTEXT`) so the agent does not inject a DLL
 into every process on the machine. In-context hooks would be faster and would be an
 absolutely unacceptable amount of ambient authority for a convenience tool.
+
+### Documents
+
+Tier C needs to know which file a window has open, and the command line is a far worse
+source than it looks:
+
+- **Packaged apps** (Windows 11 Notepad, Paint) are started by activation, so the path
+  is delivered out of band and appears on no command line.
+- **Single-instance apps** (VS Code and most editors) hand the path to the already
+  running process and exit, so no surviving process carries it either.
+
+Between them that is most applications. What both leave behind is a window title
+containing the file *name*, and an entry in `%APPDATA%\Microsoft\Windows\Recent`
+containing the full *path*. Matching one against the other resolves a real document.
+
+Two rules keep this honest:
+
+- **Never guess a directory.** A title gives a bare filename; inventing a folder for it
+  would reopen the wrong file, which is worse than reopening nothing.
+- **Only paths that exist.** A stale Recent entry would produce a restore that opens an
+  error dialog instead of a document.
+
+Resolution runs against *every* window an application owns, not just the first one -
+Notepad with three notes open would otherwise record none if its frontmost window
+happened to be untitled.
+
+Two implementation traps, both of which fail silently:
+
+- Shortcut resolution goes through COM, so the calling thread must be `CoInitialize`d.
+  Without it every lookup returns nothing and the index is simply empty.
+- Split titles on the *separator* (` - `, with spaces), never a bare `-`. Hyphens are
+  ordinary inside filenames, and splitting on them turns `sr-tier-c-demo.txt - Notepad`
+  into `demo.txt`, which matches nothing.
 
 ### Restore tier assignment
 
