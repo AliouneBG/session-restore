@@ -22,7 +22,8 @@ sr-agent - Session Restore agent
 
 USAGE:
   sr-agent                      Run the agent (default)
-  sr-agent --install [IDS]      Register native messaging hosts for all browsers
+  sr-agent --install [IDS]      Register native messaging hosts, the logon task,
+                                and a Start Menu shortcut
   sr-agent --uninstall          Remove registrations, the logon task, and (by default)
                                 every captured session
                                   --keep-data  leave the captured sessions in place
@@ -265,6 +266,14 @@ fn cmd_status() -> Result<()> {
         "Starts at logon: {}",
         if sr_agent::setup::task::is_installed() {
             "yes"
+        } else {
+            "no - run: sr-agent --install"
+        }
+    );
+    println!(
+        "Start Menu:      {}",
+        if sr_agent::setup::shortcut::is_installed() {
+            "yes - search Start for \"Session Restore\""
         } else {
             "no - run: sr-agent --install"
         }

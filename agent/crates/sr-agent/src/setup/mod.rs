@@ -8,6 +8,7 @@
 //! have been observed to clear them, and a silently missing key looks exactly like
 //! "the extension stopped working for no reason".
 
+pub mod shortcut;
 pub mod task;
 
 use anyhow::{Context, Result};
@@ -192,6 +193,15 @@ pub fn install_all(data_dir: &Path, ids: &Ids) -> Result<(Vec<String>, bool)> {
             false
         }
     };
+
+    // The way back in after Quit. The app has no main window, so without this the only
+    // things that start it are the logon task and knowing where the binary lives.
+    // A cosmetic failure here must not fail an otherwise working install.
+    if let Err(e) = shortcut::install(&exe) {
+        tracing::warn!(error = %e, "could not create the Start Menu shortcut");
+        eprintln!("warning: could not create the Start Menu shortcut: {e:#}");
+    }
+
     Ok((browsers, task_ok))
 }
 
@@ -203,6 +213,7 @@ pub fn uninstall(data_dir: &Path) -> Result<()> {
         let _ = std::fs::remove_file(data_dir.join(b.manifest_file));
     }
     let _ = task::uninstall();
+    let _ = shortcut::uninstall();
     Ok(())
 }
 

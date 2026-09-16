@@ -185,6 +185,11 @@ Add-on, and select `extension\dist\firefox\manifest.json`.
 > Firefox temporary add-ons are removed when Firefox restarts. Until the add-on is
 > signed, reload it each session.
 
+The extension has to stay enabled in each browser you want covered. It is the only
+thing that can see tabs, so a browser without it still has its applications and window
+geometry restored, but no tabs. There is nothing to turn on day to day: once it is
+loaded and enabled, it connects on its own every time the browser starts.
+
 ### 4. Register the agent
 
 ```powershell
@@ -251,6 +256,21 @@ The tray menu covers the rest:
 | Pause capture | Stops recording until you turn it back on |
 | Open data folder | Opens `%LOCALAPPDATA%\SessionRestore` |
 | Quit Session Restore | Stops the agent for this session |
+
+### If you quit it, how do you start it again
+
+Search Start for **Session Restore** and press Enter. `--install` puts a shortcut in
+your Start Menu for exactly this, because the app has no main window of its own and
+would otherwise be findable only by hunting down the executable.
+
+It also comes back on its own at your next sign-in, since the logon task starts it
+whether or not you quit.
+
+If you prefer the command line:
+
+```powershell
+schtasks /Run /TN "SessionRestore\Agent"
+```
 
 ### Restore modes
 
@@ -343,7 +363,8 @@ expiring rather than simply refusing to capture private windows at all.
 
 ```
 sr-agent                      Run the agent. This is what the logon task starts
-sr-agent --install [IDS]      Register native messaging hosts and the logon task
+sr-agent --install [IDS]      Register native messaging hosts, the logon task,
+                              and a Start Menu shortcut
     --chrome-id=<ID>            Chrome or Edge extension ID, repeatable
     --unpacked=<DIR>            Work out the ID for an unpacked extension directory
     --firefox-id=<ID>           Firefox add-on ID
@@ -424,6 +445,11 @@ Not done:
 - **No installer and no code signing.** The agent runs from its build directory, and
   SmartScreen will warn on another machine.
 - Firefox add-on is not signed, so it is a temporary add-on for now.
+- **The extension is not on any store yet**, so it has to be loaded unpacked. An
+  installer cannot install it for you: Chrome and Edge removed silent external
+  extension installs on Windows, and the only supported path for a consumer app is a
+  store listing the user adds with one click. Onboarding can open those pages and
+  detect when each browser connects, but the click is always the user's.
 - Cloud backup, cross-device restore, scroll position and macOS support are all
   deliberately out of scope for v1. The reasoning is in
   [09-roadmap.md](docs/09-roadmap.md).
