@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Session Restore",
+  "version": "0.1.0",
+  "description": "Restores your applications and browser tabs after a shutdown, reboot, or power loss.",
+  "minimum_chrome_version": "116",
+  "background": { "service_worker": "background.js", "type": "module" },
+  "permissions": ["tabs", "tabGroups", "storage", "alarms", "nativeMessaging"],
+  "host_permissions": [],
+  "incognito": "spanning",
+  "action": { "default_popup": "pages/options.html", "default_title": "Session Restore" }
+}

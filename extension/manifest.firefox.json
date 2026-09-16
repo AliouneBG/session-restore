@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Session Restore",
+  "version": "0.1.0",
+  "description": "Restores your applications and browser tabs after a shutdown, reboot, or power loss.",
+  "background": { "scripts": ["background.js"], "type": "module" },
+  "permissions": ["tabs", "storage", "alarms", "nativeMessaging"],
+  "host_permissions": [],
+  "incognito": "spanning",
+  "action": { "default_popup": "pages/options.html", "default_title": "Session Restore" },
+  "browser_specific_settings": {
+    "gecko": { "id": "session-restore@sessionrestore.local", "strict_min_version": "128.0" }
+  }
+}
