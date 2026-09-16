@@ -39,7 +39,10 @@ fn run() -> anyhow::Result<()> {
     let pipe_name = sr_ipc::pipe_name()?;
 
     let mut pipe = match sr_ipc::connect(&pipe_name) {
-        Ok(p) => p,
+        Ok(p) => {
+            eprintln!("sr-relay: connected to {pipe_name}");
+            p
+        }
         Err(e) => {
             // The agent is not running. Tell the extension so it can show a "finish
             // setup" affordance and back off, rather than retrying in a tight loop.
@@ -66,6 +69,7 @@ fn run() -> anyhow::Result<()> {
         loop {
             match read_frame(&mut pipe_reader, MAX_OUTBOUND_BYTES) {
                 Ok(msg) => {
+                    eprintln!("sr-relay: <- agent {} bytes", msg.len());
                     if write_frame(&mut out, &msg, MAX_OUTBOUND_BYTES).is_err() {
                         break; // browser closed stdout
                     }
@@ -85,6 +89,9 @@ fn run() -> anyhow::Result<()> {
         match read_frame(&mut stdin, MAX_INBOUND_BYTES) {
             Ok(raw) => {
                 let stamped = stamp_source(&raw, browser);
+                // Byte counts only, never payloads - a relay that logged message
+                // bodies would put private URLs in the browser's log.
+                eprintln!("sr-relay: -> agent {} bytes", stamped.len());
                 if let Err(e) = write_frame(&mut pipe, &stamped, MAX_OUTBOUND_BYTES) {
                     eprintln!("sr-relay: pipe write: {e}");
                     break;
@@ -135,26 +142,33 @@ fn stamp_source(raw: &str, browser: &'static str) -> String {
     }
 }
 
-/// Identifies the browser from the parent process image name.
+/// Identifies the browser by walking up the process tree.
 ///
-/// The parent of a native messaging host is the browser that spawned it, so this is
-/// reliable in a way that anything the extension self-reports is not.
+/// The immediate parent is not always the browser: Chromium spawns native messaging
+/// hosts from a utility/broker process, so the direct parent can be another
+/// `msedge.exe`-family process or an intermediate that matches nothing. Checking only
+/// the parent silently mislabelled Edge as Chrome, which would merge two browsers'
+/// tabs under one profile key on restore.
+///
+/// Walks a few levels and takes the first recognizable browser. Order matters: Edge's
+/// image name is `msedge.exe`, and a naive `contains("edge")` check would also match
+/// nothing useful, while checking `chrome` first would never reach Edge.
 fn detect_browser() -> &'static str {
-    match parent_process_name().as_deref() {
-        Some(n) => {
-            let n = n.to_ascii_lowercase();
-            if n.contains("firefox") {
-                "firefox"
-            } else if n.contains("msedge") {
-                "edge"
-            } else if n.contains("chrome") {
-                "chrome"
-            } else {
-                "chrome"
-            }
+    for name in ancestor_process_names(6) {
+        let n = name.to_ascii_lowercase();
+        if n.contains("firefox") {
+            return "firefox";
         }
-        None => "chrome",
+        if n.contains("msedge") {
+            return "edge";
+        }
+        if n.contains("chrome") {
+            return "chrome";
+        }
     }
+    // Unknown host. Chrome is the safest default: it is the most common, and a wrong
+    // guess costs attribution accuracy, not correctness.
+    "chrome"
 }
 
 /// TODO(M2): derive from the parent's `--profile-directory=` argument so "Chrome Work"
@@ -165,63 +179,74 @@ fn profile_key() -> &'static str {
     "default"
 }
 
+/// Image names of this process's ancestors, nearest first, up to `max` levels.
+///
+/// Builds a pid -> (parent pid, image name) map from one Toolhelp snapshot rather than
+/// re-snapshotting per level, and stops on a cycle so a recycled PID cannot loop.
 #[cfg(windows)]
-fn parent_process_name() -> Option<String> {
+fn ancestor_process_names(max: usize) -> Vec<String> {
+    use std::collections::{HashMap, HashSet};
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
     };
+
+    let mut out = Vec::new();
     unsafe {
-        let me = std::process::id();
-        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return out;
+        };
         let mut entry = PROCESSENTRY32W {
             dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
             ..Default::default()
         };
 
-        // Pass 1: find our parent's PID.
-        let mut parent_pid = None;
+        let mut table: HashMap<u32, (u32, String)> = HashMap::new();
         if Process32FirstW(snap, &mut entry).is_ok() {
             loop {
-                if entry.th32ProcessID == me {
-                    parent_pid = Some(entry.th32ParentProcessID);
-                    break;
-                }
-                if Process32NextW(snap, &mut entry).is_err() {
-                    break;
-                }
-            }
-        }
-        let parent_pid = parent_pid?;
-
-        // Pass 2: find that PID's image name.
-        let mut name = None;
-        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-        if Process32FirstW(snap, &mut entry).is_ok() {
-            loop {
-                if entry.th32ProcessID == parent_pid {
-                    let end = entry
-                        .szExeFile
-                        .iter()
-                        .position(|&c| c == 0)
-                        .unwrap_or(entry.szExeFile.len());
-                    name = Some(String::from_utf16_lossy(&entry.szExeFile[..end]));
-                    break;
-                }
+                let end = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                table.insert(
+                    entry.th32ProcessID,
+                    (
+                        entry.th32ParentProcessID,
+                        String::from_utf16_lossy(&entry.szExeFile[..end]),
+                    ),
+                );
                 if Process32NextW(snap, &mut entry).is_err() {
                     break;
                 }
             }
         }
         let _ = CloseHandle(snap);
-        name
+
+        let mut pid = std::process::id();
+        let mut seen = HashSet::new();
+        for _ in 0..max {
+            let Some((parent, _)) = table.get(&pid) else {
+                break;
+            };
+            let parent = *parent;
+            if parent == 0 || !seen.insert(parent) {
+                break;
+            }
+            match table.get(&parent) {
+                Some((_, name)) => out.push(name.clone()),
+                None => break,
+            }
+            pid = parent;
+        }
     }
+    out
 }
 
 #[cfg(not(windows))]
-fn parent_process_name() -> Option<String> {
-    None
+fn ancestor_process_names(_max: usize) -> Vec<String> {
+    Vec::new()
 }
 
 #[cfg(test)]

@@ -193,8 +193,22 @@ async function reconcileNow(): Promise<void> {
   }
 }
 
-chrome.runtime.onStartup.addListener(() => void boot());
-chrome.runtime.onInstalled.addListener(() => void boot());
+/// Guards against booting more than once per worker generation.
+///
+/// `onStartup`, `onInstalled`, and the module-level call can all fire for the same
+/// worker, which previously sent three `hello`s and three full reconciles back to back
+/// - visible in the agent log as duplicate messages, and wasted work on every wake.
+/// A module-level variable is the right scope here: it is reset by eviction, which is
+/// exactly when we do want to boot again.
+let booting: Promise<void> | null = null;
+
+function bootOnce(): Promise<void> {
+  if (!booting) booting = boot();
+  return booting;
+}
+
+chrome.runtime.onStartup.addListener(() => void bootOnce());
+chrome.runtime.onInstalled.addListener(() => void bootOnce());
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== ALARM_NAME) return;
@@ -215,4 +229,4 @@ if (typeof chrome.runtime.onSuspend !== "undefined") {
 
 // The worker may be started by an event rather than onStartup/onInstalled, so make
 // sure the listeners are attached and state is hydrated in that case too.
-void boot();
+void bootOnce();

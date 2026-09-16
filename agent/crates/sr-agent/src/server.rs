@@ -55,12 +55,17 @@ pub fn serve_on(name: &str, shared: Arc<Shared>) -> Result<()> {
 }
 
 fn handle_connection(conn: sr_ipc::PipeConnection, shared: Arc<Shared>) -> Result<()> {
+    tracing::debug!("connection accepted");
     let mut writer = conn.try_clone()?;
     let mut reader = conn;
+    tracing::debug!("connection split for read/write");
 
     loop {
         let raw = match read_frame(&mut reader, MAX_INBOUND_BYTES) {
-            Ok(r) => r,
+            Ok(r) => {
+                tracing::debug!(bytes = r.len(), "frame read");
+                r
+            }
             Err(FrameError::Closed) => {
                 tracing::debug!("relay disconnected");
                 return Ok(());
@@ -86,8 +91,18 @@ fn handle_connection(conn: sr_ipc::PipeConnection, shared: Arc<Shared>) -> Resul
             continue;
         }
 
-        if let Some(reply) = dispatch(&env, &shared)? {
-            write_frame(&mut writer, &serde_json::to_string(&reply)?, MAX_OUTBOUND_BYTES)?;
+        // A message we cannot handle must never end the session. Before this was
+        // separated out, one unexpected field type in one tab (Chrome reports
+        // `lastAccessed` as a fractional number) propagated out of dispatch and closed
+        // the connection, so the extension silently stopped syncing.
+        match dispatch(&env, &shared) {
+            Ok(Some(reply)) => {
+                write_frame(&mut writer, &serde_json::to_string(&reply)?, MAX_OUTBOUND_BYTES)?;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(kind = %env.kind, error = %e, "message could not be handled");
+            }
         }
     }
 }
@@ -98,6 +113,9 @@ fn dispatch(env: &Envelope, shared: &Shared) -> Result<Option<Envelope>> {
         .as_ref()
         .map(|s| s.browser.as_str())
         .unwrap_or("unknown");
+
+    // Message kind and counts only - never URLs or titles (docs/06).
+    tracing::debug!(kind = %env.kind, browser, "message received");
 
     match env.kind.as_str() {
         "hello" => {
@@ -130,12 +148,23 @@ fn dispatch(env: &Envelope, shared: &Shared) -> Result<Option<Envelope>> {
 
         "tab_delta" => {
             let body: StateBody = serde_json::from_value(env.body.clone())?;
+            tracing::debug!(
+                tabs = body.tabs.len(),
+                windows = body.windows.len(),
+                "tab_delta"
+            );
             apply_state(&body, shared, false, browser)?;
             Ok(None)
         }
 
         "full_state" => {
             let body: StateBody = serde_json::from_value(env.body.clone())?;
+            tracing::info!(
+                tabs = body.tabs.len(),
+                windows = body.windows.len(),
+                browser,
+                "reconcile"
+            );
             apply_state(&body, shared, true, browser)?;
             Ok(None)
         }

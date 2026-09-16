@@ -5,6 +5,7 @@
 
 pub mod ingest;
 pub mod server;
+pub mod setup;
 pub mod store;
 
 pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");

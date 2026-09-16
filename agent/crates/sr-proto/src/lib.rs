@@ -113,7 +113,12 @@ pub struct TabDelta {
     pub active: bool,
     #[serde(default)]
     pub muted: bool,
-    #[serde(default)]
+    /// Milliseconds since epoch.
+    ///
+    /// Deserialized leniently because Chrome reports `tab.lastAccessed` as a
+    /// *fractional* millisecond value (e.g. `1789521076302.926`). A strict i64 here
+    /// rejected every real reconcile payload the browser sent.
+    #[serde(default, deserialize_with = "de_opt_millis")]
     pub last_accessed: Option<i64>,
     #[serde(default)]
     pub private: bool,
@@ -123,6 +128,28 @@ pub struct TabDelta {
 
 fn default_true() -> bool {
     true
+}
+
+/// Accepts an integer, a float, or null for a millisecond timestamp.
+///
+/// Browser APIs are not as strictly typed as a schema suggests: numbers arrive as
+/// whatever JSON number the engine produced. Being strict here means rejecting an
+/// entire batch of tabs over one fractional timestamp, which is a bad trade for a
+/// field used only for ordering.
+fn de_opt_millis<'de, D>(d: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(match v {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Number(n)) => n
+            .as_i64()
+            .or_else(|| n.as_f64().map(|f| f as i64)),
+        // A string timestamp is not something any browser sends, but ignoring it is
+        // better than failing the batch.
+        Some(_) => None,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -273,6 +300,50 @@ mod tests {
         let a = new_id();
         let b = new_id();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn accepts_the_fractional_timestamp_chrome_actually_sends() {
+        // Regression: Chrome reports tab.lastAccessed as fractional milliseconds.
+        // A strict i64 rejected the whole payload, which killed the connection and
+        // stopped the extension syncing entirely.
+        let t: TabDelta = serde_json::from_str(
+            r#"{"op":"upsert","tab_key":"w1:t1","window_id":"w1","last_accessed":1789521076302.926}"#,
+        )
+        .unwrap();
+        assert_eq!(t.last_accessed, Some(1789521076302));
+    }
+
+    #[test]
+    fn accepts_an_integer_timestamp_too() {
+        let t: TabDelta = serde_json::from_str(
+            r#"{"op":"upsert","tab_key":"w1:t1","window_id":"w1","last_accessed":1789521076302}"#,
+        )
+        .unwrap();
+        assert_eq!(t.last_accessed, Some(1789521076302));
+    }
+
+    #[test]
+    fn a_null_or_absent_timestamp_is_fine() {
+        let a: TabDelta = serde_json::from_str(
+            r#"{"op":"upsert","tab_key":"w1:t1","window_id":"w1","last_accessed":null}"#,
+        )
+        .unwrap();
+        assert_eq!(a.last_accessed, None);
+        let b: TabDelta =
+            serde_json::from_str(r#"{"op":"upsert","tab_key":"w1:t1","window_id":"w1"}"#).unwrap();
+        assert_eq!(b.last_accessed, None);
+    }
+
+    #[test]
+    fn an_unusable_timestamp_does_not_fail_the_tab() {
+        // Dropping one ordering hint beats rejecting a batch of real tabs.
+        let t: TabDelta = serde_json::from_str(
+            r#"{"op":"upsert","tab_key":"w1:t1","window_id":"w1","last_accessed":"yesterday"}"#,
+        )
+        .unwrap();
+        assert_eq!(t.last_accessed, None);
+        assert_eq!(t.tab_key, "w1:t1");
     }
 
     #[test]

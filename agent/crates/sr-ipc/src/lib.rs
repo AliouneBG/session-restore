@@ -37,7 +37,7 @@ use windows::Win32::Security::Authorization::{
 use windows::Win32::Security::{GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, PSECURITY_DESCRIPTOR};
 #[cfg(windows)]
 use windows::Win32::Storage::FileSystem::{
-    FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
+    FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
 };
 #[cfg(windows)]
 use windows::Win32::System::Pipes::{
@@ -46,6 +46,8 @@ use windows::Win32::System::Pipes::{
 };
 #[cfg(windows)]
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+#[cfg(windows)]
+use windows::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
 
 const PIPE_BUF: u32 = 64 * 1024;
 
@@ -182,20 +184,85 @@ impl PipeConnection {
 #[cfg(windows)]
 unsafe impl Send for PipeConnection {}
 
+/// Runs one overlapped operation to completion.
+///
+/// **Why overlapped I/O is mandatory here, not a refinement.**
+///
+/// A handle opened for synchronous I/O serializes every operation on the underlying
+/// *file object*. `DuplicateHandle` does not create a new file object - it adds a
+/// reference to the same one. So a reader thread parked in a blocking `ReadFile` also
+/// blocks a writer thread on a duplicated handle, and the two deadlock: the relay
+/// waiting to write four bytes the agent is waiting to read.
+///
+/// With `FILE_FLAG_OVERLAPPED`, each call carries its own `OVERLAPPED` and event, so
+/// reads and writes proceed independently. Each call still *waits* for its own
+/// completion, which keeps the blocking `Read`/`Write` interface the framing code
+/// expects.
+#[cfg(windows)]
+unsafe fn await_overlapped(
+    handle: HANDLE,
+    start: impl FnOnce(*mut OVERLAPPED) -> windows::core::Result<()>,
+) -> std::io::Result<u32> {
+    use windows::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_PIPE_NOT_CONNECTED};
+    use windows::Win32::System::Threading::CreateEventW;
+
+    let event = CreateEventW(None, true, false, None)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+    let mut ov = OVERLAPPED {
+        hEvent: event,
+        ..Default::default()
+    };
+
+    let started = start(&mut ov as *mut OVERLAPPED);
+    if let Err(e) = started {
+        let code = e.code().0 as u32 & 0xFFFF;
+        if code != ERROR_IO_PENDING.0 {
+            let _ = CloseHandle(event);
+            return Err(map_pipe_error(code, &e));
+        }
+    }
+
+    let mut transferred = 0u32;
+    let r = GetOverlappedResult(handle, &ov, &mut transferred, true);
+    let _ = CloseHandle(event);
+
+    match r {
+        Ok(()) => Ok(transferred),
+        Err(e) => {
+            let code = e.code().0 as u32 & 0xFFFF;
+            // A peer that closed cleanly surfaces as broken/not-connected; report it
+            // as EOF so the framing layer treats it as a clean close rather than a
+            // failure (docs/05-ipc-protocol.md).
+            if code == ERROR_BROKEN_PIPE.0 || code == ERROR_PIPE_NOT_CONNECTED.0 {
+                return Ok(0);
+            }
+            Err(map_pipe_error(code, &e))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn map_pipe_error(code: u32, e: &windows::core::Error) -> std::io::Error {
+    use windows::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED};
+    let kind = if code == ERROR_BROKEN_PIPE.0 || code == ERROR_PIPE_NOT_CONNECTED.0 {
+        std::io::ErrorKind::BrokenPipe
+    } else {
+        std::io::ErrorKind::Other
+    };
+    std::io::Error::new(kind, e.to_string())
+}
+
 #[cfg(windows)]
 impl Read for PipeConnection {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         use windows::Win32::Storage::FileSystem::ReadFile;
-        let mut read = 0u32;
-        unsafe {
-            ReadFile(self.handle, Some(buf), Some(&mut read), None)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-        }
-        if read == 0 {
-            // Zero bytes on a blocking pipe read means the peer closed.
-            return Ok(0);
-        }
-        Ok(read as usize)
+        let handle = self.handle;
+        let n = unsafe {
+            await_overlapped(handle, |ov| ReadFile(handle, Some(buf), None, Some(ov)))?
+        };
+        // Zero bytes means the peer closed.
+        Ok(n as usize)
     }
 }
 
@@ -203,20 +270,29 @@ impl Read for PipeConnection {
 impl Write for PipeConnection {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         use windows::Win32::Storage::FileSystem::WriteFile;
-        let mut written = 0u32;
-        unsafe {
-            WriteFile(self.handle, Some(buf), Some(&mut written), None)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let handle = self.handle;
+        let n = unsafe {
+            await_overlapped(handle, |ov| WriteFile(handle, Some(buf), None, Some(ov)))?
+        };
+        if n == 0 && !buf.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "peer closed the pipe",
+            ));
         }
-        Ok(written as usize)
+        Ok(n as usize)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        use windows::Win32::Storage::FileSystem::FlushFileBuffers;
-        unsafe {
-            FlushFileBuffers(self.handle)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-        }
+        // Deliberately a no-op.
+        //
+        // `WriteFile` on a named pipe hands the bytes to the kernel immediately - there
+        // is no userspace buffer to flush. `FlushFileBuffers` looks like the right call
+        // and is a trap: on the write end of a pipe it "does not return until the
+        // reading process has read all the data", so it blocks on the peer's read
+        // cadence. That turned every frame write into a rendezvous and deadlocked the
+        // relay against the agent.
+        Ok(())
     }
 }
 
@@ -241,7 +317,10 @@ pub fn accept_one(name: &str, first: bool) -> Result<PipeConnection> {
     let sid = current_user_sid()?;
     let (psd, sa) = user_only_security_descriptor(&sid)?;
 
-    let mut open_mode = PIPE_ACCESS_DUPLEX;
+    // FILE_FLAG_OVERLAPPED on the server end as well: the agent writes replies from
+    // the same handler that may have a read pending, and synchronous handles would
+    // serialize the two.
+    let mut open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
     if first {
         open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
     }
@@ -266,16 +345,52 @@ pub fn accept_one(name: &str, first: bool) -> Result<PipeConnection> {
             ));
         }
 
+        // On an overlapped pipe, ConnectNamedPipe needs its own OVERLAPPED and returns
+        // immediately with ERROR_IO_PENDING; the wait happens in GetOverlappedResult.
+        //
         // ERROR_PIPE_CONNECTED (535) means a client raced in between CreateNamedPipe
         // and ConnectNamedPipe. That is a successful connection, not a failure, and
         // treating it as an error would drop every connection that arrives fast.
         const ERROR_PIPE_CONNECTED: u32 = 535;
-        if let Err(e) = ConnectNamedPipe(handle, None) {
-            if (e.code().0 as u32 & 0xFFFF) != ERROR_PIPE_CONNECTED {
+        const ERROR_IO_PENDING: u32 = 997;
+
+        use windows::Win32::System::Threading::CreateEventW;
+        let event = match CreateEventW(None, true, false, None) {
+            Ok(e) => e,
+            Err(e) => {
                 let _ = CloseHandle(handle);
-                return Err(anyhow!("ConnectNamedPipe failed: {e}"));
+                return Err(anyhow!("CreateEvent failed: {e}"));
+            }
+        };
+        let mut ov = OVERLAPPED {
+            hEvent: event,
+            ..Default::default()
+        };
+
+        let mut connected = false;
+        match ConnectNamedPipe(handle, Some(&mut ov)) {
+            Ok(()) => connected = true,
+            Err(e) => {
+                let code = e.code().0 as u32 & 0xFFFF;
+                if code == ERROR_PIPE_CONNECTED {
+                    connected = true;
+                } else if code != ERROR_IO_PENDING {
+                    let _ = CloseHandle(event);
+                    let _ = CloseHandle(handle);
+                    return Err(anyhow!("ConnectNamedPipe failed: {e}"));
+                }
             }
         }
+
+        if !connected {
+            let mut transferred = 0u32;
+            if let Err(e) = GetOverlappedResult(handle, &ov, &mut transferred, true) {
+                let _ = CloseHandle(event);
+                let _ = CloseHandle(handle);
+                return Err(anyhow!("waiting for a client failed: {e}"));
+            }
+        }
+        let _ = CloseHandle(event);
 
         Ok(PipeConnection::new(handle, true))
     }
@@ -284,17 +399,24 @@ pub fn accept_one(name: &str, first: bool) -> Result<PipeConnection> {
 /// Connects to the agent's pipe as a client. Used by the relay.
 #[cfg(windows)]
 pub fn connect(name: &str) -> Result<PipeConnection> {
-    use windows::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_MODE, OPEN_EXISTING,
-    };
+    use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_MODE, OPEN_EXISTING};
     unsafe {
+        // GENERIC_READ | GENERIC_WRITE, not FILE_GENERIC_*.
+        //
+        // This distinction is not cosmetic. FILE_GENERIC_WRITE contains
+        // FILE_APPEND_DATA (0x0004), and on a named pipe that same bit means
+        // FILE_CREATE_PIPE_INSTANCE. Asking for it yields a handle that opens
+        // successfully and looks connected, but is not bound to the instance the
+        // server is waiting on - so both sides sit forever, the client blocked in
+        // WriteFile and the server in ReadFile, over four bytes.
         let handle = CreateFileW(
             &HSTRING::from(name),
-            (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+            GENERIC_READ.0 | GENERIC_WRITE.0,
             FILE_SHARE_MODE(0),
             None,
             OPEN_EXISTING,
-            Default::default(),
+            windows::Win32::Storage::FileSystem::FILE_FLAG_OVERLAPPED,
             None,
         )
         .context("the agent does not appear to be running")?;

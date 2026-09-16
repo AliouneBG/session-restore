@@ -327,6 +327,114 @@ fn unknown_message_types_are_ignored_rather_than_fatal() {
 }
 
 #[test]
+fn a_tab_with_a_fractional_timestamp_is_stored() {
+    // Regression, found only by running a real browser: Chrome reports
+    // tab.lastAccessed as fractional milliseconds.
+    let h = Harness::start();
+    let mut c = h.connect();
+    send(&mut c, hello());
+    let _ = recv(&mut c);
+
+    send(
+        &mut c,
+        serde_json::json!({
+            "v": 1, "id": "mf", "type": "full_state", "ts": 0,
+            "src": { "browser": "chrome", "profile_key": "default", "ext_version": "0.1.0" },
+            "body": {
+                "windows": [{ "op": "upsert", "window_id": "w1" }],
+                "tabs": [{ "op": "upsert", "tab_key": "w1:t1", "window_id": "w1", "index": 0,
+                           "url": "https://example.test/a",
+                           "last_accessed": 1789521076302.926 }],
+                "groups": []
+            }
+        }),
+    );
+
+    for _ in 0..40 {
+        if h.tab_count() == 1 { break; }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(h.tab_count(), 1, "a fractional timestamp lost the whole batch");
+}
+
+#[test]
+fn an_undecodable_body_does_not_end_the_session() {
+    // The severe half of the same bug: a body that fails to decode used to propagate
+    // out and close the connection, so the extension silently stopped syncing.
+    let h = Harness::start();
+    let mut c = h.connect();
+    send(&mut c, hello());
+    let _ = recv(&mut c);
+
+    send(
+        &mut c,
+        serde_json::json!({
+            "v": 1, "id": "mbad", "type": "full_state", "ts": 0,
+            "src": { "browser": "chrome", "profile_key": "default", "ext_version": "0.1.0" },
+            "body": { "windows": "not-an-array", "tabs": 42, "groups": null }
+        }),
+    );
+
+    // The connection must still be usable afterwards.
+    send(&mut c, hello());
+    assert_eq!(recv(&mut c).kind, "hello_ack");
+
+    // And real data must still flow.
+    send(
+        &mut c,
+        serde_json::json!({
+            "v": 1, "id": "mok", "type": "full_state", "ts": 0,
+            "src": { "browser": "chrome", "profile_key": "default", "ext_version": "0.1.0" },
+            "body": {
+                "windows": [{ "op": "upsert", "window_id": "w1" }],
+                "tabs": [{ "op": "upsert", "tab_key": "w1:t1", "window_id": "w1",
+                           "index": 0, "url": "https://example.test/after" }],
+                "groups": []
+            }
+        }),
+    );
+    for _ in 0..40 {
+        if h.tab_count() == 1 { break; }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(h.tab_count(), 1, "session did not survive an undecodable body");
+}
+
+#[test]
+fn a_client_can_read_and_write_concurrently() {
+    // Regression for a deadlock no other test could catch, because every other test
+    // reads and writes from one thread.
+    //
+    // The relay genuinely needs both at once: a pump thread reads pushes from the
+    // agent while the main thread forwards messages to it. On a handle opened for
+    // SYNCHRONOUS i/o, all operations on the underlying file object are serialized -
+    // and DuplicateHandle shares that file object rather than making a new one. So a
+    // parked ReadFile blocked the WriteFile behind it and the two processes waited on
+    // each other forever, over four bytes. The fix is FILE_FLAG_OVERLAPPED.
+    use std::sync::mpsc;
+
+    let h = Harness::start();
+    let mut writer = h.connect();
+    let mut reader = writer.try_clone().unwrap();
+
+    // Park a reader before writing anything, which is what the relay does.
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let got = read_frame(&mut reader, MAX_INBOUND_BYTES);
+        let _ = tx.send(got.map(|s| s.len()).unwrap_or(0));
+    });
+    std::thread::sleep(Duration::from_millis(200));
+
+    // With synchronous handles this write never completes.
+    send(&mut writer, hello());
+
+    let len = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("deadlocked: the reply never arrived while a read was pending");
+    assert!(len > 0, "expected a hello_ack frame, got an empty read");
+}
+
+#[test]
 fn several_browsers_can_be_connected_at_once() {
     let h = Harness::start();
     let mut chrome = h.connect();
