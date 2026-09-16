@@ -145,7 +145,7 @@ unsafe fn is_elevated(handle: windows::Win32::Foundation::HANDLE) -> bool {
 /// cache command lines as processes start, using this only for processes that predate
 /// the agent.
 #[cfg(windows)]
-fn read_command_line(pid: u32) -> Result<String> {
+pub fn read_command_line(pid: u32) -> Result<String> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
@@ -292,4 +292,133 @@ pub fn info_for_pid(pid: u32) -> Result<ProcessInfo> {
         command_line_redacted: false,
         elevated: false,
     })
+}
+
+/// Extracts a browser profile identifier from its command line.
+///
+/// Chromium uses `--profile-directory=Profile 1`; Firefox uses `-P name` or
+/// `--profile <path>`. Absent means the default profile, which is the common case and
+/// must not be confused with "unknown".
+///
+/// This is what keeps "Chrome Work" and "Chrome Personal" from merging into one
+/// session: without it every profile of a browser shares a key, and restoring one
+/// would pour the other's tabs into it.
+pub fn profile_from_command_line(cmd: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let args: Vec<&str> = split_quoted(cmd);
+    let mut raw: Option<String> = None;
+
+    for (i, arg) in args.iter().enumerate() {
+        let lower = arg.to_ascii_lowercase();
+        if let Some(v) = lower.strip_prefix("--profile-directory=") {
+            raw = Some(v.trim_matches('"').to_string());
+            break;
+        }
+        if let Some(v) = lower.strip_prefix("--profile=") {
+            raw = Some(v.trim_matches('"').to_string());
+            break;
+        }
+        if lower == "-p" || lower == "--profile" || lower == "-profile" {
+            if let Some(next) = args.get(i + 1) {
+                if !next.starts_with('-') {
+                    raw = Some(next.trim_matches('"').to_ascii_lowercase());
+                    break;
+                }
+            }
+        }
+    }
+
+    match raw {
+        None => "default".to_string(),
+        Some(v) if v.is_empty() || v == "default" => "default".to_string(),
+        Some(v) => {
+            // Hashed rather than stored: a profile path can contain the user's name,
+            // and nothing needs the literal value to tell two profiles apart.
+            let d = Sha256::digest(v.as_bytes());
+            d.iter().take(6).map(|b| format!("{b:02x}")).collect()
+        }
+    }
+}
+
+/// Splits a command line, keeping quoted runs together.
+fn split_quoted(cmd: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let bytes = cmd.as_bytes();
+    let mut start = 0usize;
+    let mut in_quotes = false;
+
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'"' => in_quotes = !in_quotes,
+            b' ' | b'\t' if !in_quotes => {
+                if i > start {
+                    out.push(&cmd[start..i]);
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < cmd.len() {
+        out.push(&cmd[start..]);
+    }
+    out
+}
+
+#[cfg(not(windows))]
+pub fn read_command_line(_pid: u32) -> Result<String> {
+    anyhow::bail!("not supported on this platform")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::profile_from_command_line as p;
+
+    #[test]
+    fn no_profile_flag_means_the_default_profile() {
+        // The common case, and it must not be confused with "unknown".
+        assert_eq!(p(r#""C:\x\chrome.exe""#), "default");
+    }
+
+    #[test]
+    fn an_explicit_default_is_still_the_default() {
+        assert_eq!(p("chrome.exe --profile-directory=Default"), "default");
+    }
+
+    #[test]
+    fn named_chromium_profiles_are_distinguished() {
+        let work = p(r#"chrome.exe --profile-directory="Profile 1""#);
+        let personal = p(r#"chrome.exe --profile-directory="Profile 2""#);
+        assert_ne!(work, personal);
+        assert_ne!(work, "default");
+    }
+
+    #[test]
+    fn the_same_profile_always_gives_the_same_key() {
+        assert_eq!(
+            p(r#"chrome.exe --profile-directory="Profile 1""#),
+            p(r#"chrome.exe --profile-directory="Profile 1" --other-flag"#)
+        );
+    }
+
+    #[test]
+    fn firefox_named_profiles_are_distinguished() {
+        assert_ne!(p("firefox.exe -P work"), p("firefox.exe -P personal"));
+        assert_ne!(p("firefox.exe -P work"), "default");
+    }
+
+    #[test]
+    fn a_dangling_profile_flag_does_not_panic() {
+        assert_eq!(p("firefox.exe -P"), "default");
+        assert_eq!(p("firefox.exe -P --headless"), "default");
+    }
+
+    #[test]
+    fn the_key_does_not_leak_the_profile_name() {
+        // A profile path can contain the user's name; nothing needs the literal value.
+        let key = p(r#"chrome.exe --profile-directory="Aliou Work""#);
+        assert!(!key.to_lowercase().contains("aliou"));
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 }

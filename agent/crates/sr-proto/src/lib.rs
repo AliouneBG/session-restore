@@ -38,6 +38,14 @@ pub struct MessageSource {
     pub browser: BrowserKind,
     pub profile_key: String,
     pub ext_version: String,
+    /// PID of the browser that spawned the relay.
+    ///
+    /// The relay reports it rather than resolving the profile itself: reading another
+    /// process's command line needs the PEB machinery, and the relay is deliberately
+    /// the least-privileged component with the smallest dependency surface (ADR-0002).
+    /// The agent already has that machinery, so it does the resolving.
+    #[serde(default)]
+    pub browser_pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -8,7 +8,7 @@
 | M1 — Capture, tabs, T1 reconcile | **Done** for Chrome/Edge. Live tabs land in SQLite with title, order, active flag, pinned state, and window geometry. |
 | M2 — Apps and windows | **Done.** Apps, windows, geometry, displays, tiers and redacted command lines land in SQLite. |
 | M3 — Restore | **Done.** Browsers get their missing tabs back; applications are relaunched by tier and their windows placed, including across a changed monitor layout or DPI. No review UI, so app restore is opt-in. |
-| M4 — T0 deltas / T2 shutdown | T0 event deltas done. T2 shutdown hook not written. |
+| M4 — T0 deltas / T2 shutdown | **Done.** Event deltas plus a `WM_QUERYENDSESSION` flush bounded at 2s. |
 | M5 — Private windows | Storage, crypto, TTL and the chokepoint are done and tested; the **two-stage opt-in has not been exercised with a real private window**. |
 | M6 — Firefox | **Done.** Runs in Firefox, connects, captures. AMO lint clean: 0 errors, 0 warnings, 0 notices. |
 | M7 — Polish | **Tray, review window and logon task done.** No MSI/MSIX installer yet, and nothing is signed. |
@@ -46,8 +46,6 @@ listed below.
 
 ### Known gaps
 
-- `profile_key` is hardcoded to `"default"`, so two profiles of the same browser merge.
-  Needs the command-line machinery from M2.
 - No tray, no review window; `--status` is the only UI.
 - A `pre_restore` snapshot is taken on every restore, but nothing consumes it yet -
   there is no Undo action.
@@ -63,6 +61,9 @@ listed below.
 - App capture polls every 60s rather than using `SetWinEventHook`, so window moves take
   up to a minute to register. Event hooks are an optimization on a pass that is now
   known-correct.
+- `--undo` re-places the previous windows but never closes what a restore opened.
+  Closing applications to undo risks destroying work done since, which is worse than a
+  few extra windows.
 - Command lines come from a PEB read. ETW (the intended primary source) is not wired
   up, so processes are read one at a time rather than cached as they start.
 - Virtual desktop membership is not captured; see [08](08-agent.md) for why the public

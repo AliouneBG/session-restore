@@ -33,7 +33,7 @@ fn main() {
 }
 
 fn run() -> anyhow::Result<()> {
-    let browser = detect_browser();
+    let (browser, browser_pid) = detect_browser_with_pid();
     eprintln!("sr-relay {RELAY_VERSION} starting (browser={browser})");
 
     let pipe_name = sr_ipc::pipe_name()?;
@@ -88,7 +88,7 @@ fn run() -> anyhow::Result<()> {
     loop {
         match read_frame(&mut stdin, MAX_INBOUND_BYTES) {
             Ok(raw) => {
-                let stamped = stamp_source(&raw, browser);
+                let stamped = stamp_source(&raw, browser, browser_pid);
                 // Byte counts only, never payloads - a relay that logged message
                 // bodies would put private URLs in the browser's log.
                 eprintln!("sr-relay: -> agent {} bytes", stamped.len());
@@ -115,7 +115,7 @@ fn run() -> anyhow::Result<()> {
 ///
 /// Any `src` the extension supplied is discarded rather than merged - a field the
 /// extension controls must never influence how the agent attributes its data.
-fn stamp_source(raw: &str, browser: &'static str) -> String {
+fn stamp_source(raw: &str, browser: &'static str, browser_pid: Option<u32>) -> String {
     match serde_json::from_str::<serde_json::Value>(raw) {
         Ok(mut v) => {
             if let Some(obj) = v.as_object_mut() {
@@ -129,8 +129,11 @@ fn stamp_source(raw: &str, browser: &'static str) -> String {
                     "src".into(),
                     serde_json::json!({
                         "browser": browser,
-                        "profile_key": profile_key(),
+                        // A placeholder the agent replaces once it has resolved the
+                        // real profile from the browser's command line.
+                        "profile_key": "default",
                         "ext_version": ext_version,
+                        "browser_pid": browser_pid,
                     }),
                 );
             }
@@ -153,30 +156,23 @@ fn stamp_source(raw: &str, browser: &'static str) -> String {
 /// Walks a few levels and takes the first recognizable browser. Order matters: Edge's
 /// image name is `msedge.exe`, and a naive `contains("edge")` check would also match
 /// nothing useful, while checking `chrome` first would never reach Edge.
-fn detect_browser() -> &'static str {
-    for name in ancestor_process_names(6) {
+/// The browser that spawned us, and its pid.
+fn detect_browser_with_pid() -> (&'static str, Option<u32>) {
+    for (name, pid) in ancestor_processes(6) {
         let n = name.to_ascii_lowercase();
         if n.contains("firefox") {
-            return "firefox";
+            return ("firefox", Some(pid));
         }
         if n.contains("msedge") {
-            return "edge";
+            return ("edge", Some(pid));
         }
         if n.contains("chrome") {
-            return "chrome";
+            return ("chrome", Some(pid));
         }
     }
     // Unknown host. Chrome is the safest default: it is the most common, and a wrong
     // guess costs attribution accuracy, not correctness.
-    "chrome"
-}
-
-/// TODO(M2): derive from the parent's `--profile-directory=` argument so "Chrome Work"
-/// and "Chrome Personal" stay distinct (docs/03-capture.md). Reading another process's
-/// command line needs the PEB/ETW machinery the agent grows in M2; until then every
-/// profile of a given browser shares one key, which merges their tabs on restore.
-fn profile_key() -> &'static str {
-    "default"
+    ("chrome", None)
 }
 
 /// Image names of this process's ancestors, nearest first, up to `max` levels.
@@ -184,7 +180,7 @@ fn profile_key() -> &'static str {
 /// Builds a pid -> (parent pid, image name) map from one Toolhelp snapshot rather than
 /// re-snapshotting per level, and stops on a cycle so a recycled PID cannot loop.
 #[cfg(windows)]
-fn ancestor_process_names(max: usize) -> Vec<String> {
+fn ancestor_processes(max: usize) -> Vec<(String, u32)> {
     use std::collections::{HashMap, HashSet};
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -192,7 +188,7 @@ fn ancestor_process_names(max: usize) -> Vec<String> {
         TH32CS_SNAPPROCESS,
     };
 
-    let mut out = Vec::new();
+    let mut out: Vec<(String, u32)> = Vec::new();
     unsafe {
         let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
             return out;
@@ -235,7 +231,7 @@ fn ancestor_process_names(max: usize) -> Vec<String> {
                 break;
             }
             match table.get(&parent) {
-                Some((_, name)) => out.push(name.clone()),
+                Some((_, name)) => out.push((name.clone(), parent)),
                 None => break,
             }
             pid = parent;
@@ -245,7 +241,7 @@ fn ancestor_process_names(max: usize) -> Vec<String> {
 }
 
 #[cfg(not(windows))]
-fn ancestor_process_names(_max: usize) -> Vec<String> {
+fn ancestor_processes(_max: usize) -> Vec<(String, u32)> {
     Vec::new()
 }
 
@@ -258,6 +254,7 @@ mod tests {
         let out = stamp_source(
             r#"{"v":1,"id":"a","type":"hello","ts":1,"body":{"ext_version":"1.2.3"}}"#,
             "firefox",
+            Some(42),
         );
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["src"]["browser"], "firefox");
@@ -270,6 +267,7 @@ mod tests {
         let out = stamp_source(
             r#"{"v":1,"id":"a","type":"hello","ts":1,"src":{"browser":"chrome","profile_key":"spoofed","ext_version":"x"},"body":{}}"#,
             "firefox",
+            None,
         );
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["src"]["browser"], "firefox");
@@ -281,6 +279,7 @@ mod tests {
         let out = stamp_source(
             r#"{"v":1,"id":"a","type":"tab_delta","ts":1,"body":{"tabs":[{"op":"upsert","tab_key":"w1:t1","window_id":"w1","private":true}]}}"#,
             "chrome",
+            None,
         );
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["body"]["tabs"][0]["private"], true);
@@ -289,6 +288,6 @@ mod tests {
 
     #[test]
     fn forwards_unparseable_input_rather_than_dropping_it() {
-        assert_eq!(stamp_source("not json", "chrome"), "not json");
+        assert_eq!(stamp_source("not json", "chrome", None), "not json");
     }
 }

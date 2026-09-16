@@ -23,12 +23,15 @@ sr-agent - Session Restore agent
 USAGE:
   sr-agent                      Run the agent (default)
   sr-agent --install [IDS]      Register native messaging hosts for all browsers
-  sr-agent --uninstall          Remove registrations and manifests
+  sr-agent --uninstall          Remove registrations, the logon task, and (by default)
+                                every captured session
+                                  --keep-data  leave the captured sessions in place
   sr-agent --status             Show registration and database status
   sr-agent --capture            Run one application/window capture pass and print it
   sr-agent --restore-apps       Launch and place the applications from the newest snapshot
                                   --dry-run   decide everything, start nothing
                                   --snapshot=<ID>  restore a specific snapshot
+  sr-agent --undo               Return to the session that was open before the last restore
 
 INSTALL OPTIONS:
   --chrome-id=<ID>    Chrome/Edge extension ID. Repeatable.
@@ -50,13 +53,15 @@ fn main() {
     } else if args.iter().any(|a| a == "--install") {
         cmd_install(&args)
     } else if args.iter().any(|a| a == "--uninstall") {
-        cmd_uninstall()
+        cmd_uninstall(&args)
     } else if args.iter().any(|a| a == "--status") {
         cmd_status()
     } else if args.iter().any(|a| a == "--capture") {
         cmd_capture()
     } else if args.iter().any(|a| a == "--restore-apps") {
         cmd_restore_apps(&args)
+    } else if args.iter().any(|a| a == "--undo") {
+        cmd_undo()
     } else {
         run()
     };
@@ -117,14 +122,122 @@ fn cmd_install(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn cmd_uninstall() -> Result<()> {
+fn cmd_uninstall(args: &[String]) -> Result<()> {
     let dir = data_dir()?;
+    let keep = args.iter().any(|a| a == "--keep-data");
+
     sr_agent::setup::uninstall(&dir)?;
     println!("Removed native messaging registrations, manifests, and the logon task.");
+
+    if keep {
+        println!("Captured sessions left in {}.", dir.display());
+        return Ok(());
+    }
+
+    // Deleting is the default, not an option.
+    //
+    // A tool whose whole pitch is that your browsing history stays private has not
+    // really uninstalled while a complete history of it is still sitting on disk
+    // (docs/06-privacy-security.md). --keep-data exists for people reinstalling.
+    let removed = purge_data(&dir)?;
+    println!("Deleted {removed} data file(s) from {}.", dir.display());
+    println!("Nothing captured by Session Restore remains on this computer.");
+    Ok(())
+}
+
+/// Removes every file the agent wrote: database, keys, logs, cached icons.
+fn purge_data(dir: &std::path::Path) -> Result<usize> {
+    let mut removed = 0usize;
+
+    // The database first, and through SQLite so the -wal and -shm siblings go with it
+    // rather than being left holding recent pages.
+    let db_path = dir.join("sessions.db");
+    if db_path.exists() {
+        if let Ok(db) = Db::open(&db_path) {
+            let _ = db.conn.execute_batch("PRAGMA secure_delete=ON; VACUUM;");
+            let _ = db.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+        }
+    }
+
+    for name in [
+        "sessions.db",
+        "sessions.db-wal",
+        "sessions.db-shm",
+        // Without this the encrypted private rows would be unreadable anyway, but
+        // leaving a key behind after "delete everything" is not a thing to do.
+        "keys.bin",
+    ] {
+        let p = dir.join(name);
+        if p.exists() && std::fs::remove_file(&p).is_ok() {
+            removed += 1;
+        }
+    }
+
+    for sub in ["logs", "icons"] {
+        let p = dir.join(sub);
+        if p.exists() && std::fs::remove_dir_all(&p).is_ok() {
+            removed += 1;
+        }
+    }
+
+    // Any corrupt databases moved aside by a previous run count too.
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("sessions.db.corrupt-") && std::fs::remove_file(e.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+
+    Ok(removed)
+}
+
+/// Reverses the most recent restore.
+///
+/// Every restore writes a `pre_restore` snapshot first; this is what consumes it.
+/// Without it that snapshot was an undo point nothing could reach.
+fn cmd_undo() -> Result<()> {
+    let dir = data_dir()?;
+    let db = Db::open(&dir.join("sessions.db"))?;
+
+    let run: Option<(i64, i64, Option<i64>)> = db
+        .conn
+        .query_row(
+            "SELECT id, snapshot_id, undo_snapshot_id FROM restore_runs
+             ORDER BY started_at DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok();
+
+    let Some((run_id, _snapshot_id, undo)) = run else {
+        println!("No restore to undo.");
+        return Ok(());
+    };
+    let Some(undo_snapshot) = undo else {
+        println!("Restore #{run_id} has no undo point (nothing was open when it ran).");
+        return Ok(());
+    };
+
+    let apps = sr_agent::restore::apps::plan_from_snapshot(&db, undo_snapshot)?;
     println!(
-        "Captured session data in {} was left in place; delete it to remove everything.",
-        dir.display()
+        "Undoing restore #{run_id}: returning to the {} application(s) open beforehand.",
+        apps.len()
     );
+
+    // Deliberately only re-places windows; it does not close what the restore opened.
+    //
+    // Closing applications to undo would risk destroying work the user has done since,
+    // which is a far worse outcome than a few extra windows being open.
+    let displays = sr_agent::watcher::displays::enumerate()?;
+    let report = sr_agent::restore::apps::restore_apps(&apps, &displays, false);
+    println!(
+        "Restored {} application(s), placed {} window(s).",
+        report.launched.len(),
+        report.placed
+    );
+    println!("Windows opened by the restore were left alone rather than closed.");
     Ok(())
 }
 
@@ -511,6 +624,13 @@ fn run() -> Result<()> {
             tracing::error!(error = %e, "pipe server stopped");
         }
     });
+
+    // T2: the best-effort flush when Windows shuts down. Installed on the UI thread
+    // because that is the one running a message pump. Failure here is not fatal - T1
+    // already bounds how much a shutdown can cost us.
+    if let Err(e) = sr_agent::shutdown::install(Arc::clone(&db)) {
+        tracing::warn!(error = %e, "could not install the shutdown hook");
+    }
 
     // `ask` is the default, and now there is something to ask with.
     let review_at_start = pending.is_some() && restore_mode == "ask";

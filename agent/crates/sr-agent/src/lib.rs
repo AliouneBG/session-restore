@@ -6,6 +6,7 @@
 pub mod ingest;
 pub mod restore;
 pub mod server;
+pub mod shutdown;
 pub mod setup;
 pub mod store;
 pub mod ui;

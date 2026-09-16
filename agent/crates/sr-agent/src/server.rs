@@ -96,6 +96,10 @@ fn handle_connection(conn: sr_ipc::PipeConnection, shared: Arc<Shared>) -> Resul
     let mut reader = conn;
     tracing::debug!("connection split for read/write");
 
+    // Resolved once from the browser's command line and reused for every message on
+    // this connection: one relay is one browser profile, for its whole lifetime.
+    let mut profile: Option<String> = None;
+
     loop {
         let raw = match read_frame(&mut reader, MAX_INBOUND_BYTES) {
             Ok(r) => {
@@ -131,7 +135,13 @@ fn handle_connection(conn: sr_ipc::PipeConnection, shared: Arc<Shared>) -> Resul
         // separated out, one unexpected field type in one tab (Chrome reports
         // `lastAccessed` as a fractional number) propagated out of dispatch and closed
         // the connection, so the extension silently stopped syncing.
-        match dispatch(&env, &shared) {
+        if profile.is_none() {
+            if let Some(pid) = env.src.as_ref().and_then(|s| s.browser_pid) {
+                profile = Some(resolve_profile(pid));
+            }
+        }
+
+        match dispatch(&env, &shared, profile.as_deref()) {
             Ok(replies) => {
                 for reply in replies {
                     write_frame(&mut writer, &serde_json::to_string(&reply)?, MAX_OUTBOUND_BYTES)?;
@@ -144,17 +154,39 @@ fn handle_connection(conn: sr_ipc::PipeConnection, shared: Arc<Shared>) -> Resul
     }
 }
 
-fn dispatch(env: &Envelope, shared: &Shared) -> Result<Vec<Envelope>> {
+/// Turns a browser pid into a stable profile key.
+///
+/// Falls back to `default` when the command line cannot be read - which is the honest
+/// answer, since the overwhelmingly common case is a single default profile, and
+/// inventing a distinct key per failure would fragment one user's session into
+/// several.
+fn resolve_profile(browser_pid: u32) -> String {
+    match crate::watcher::processes::read_command_line(browser_pid) {
+        Ok(cmd) => {
+            let key = crate::watcher::processes::profile_from_command_line(&cmd);
+            tracing::debug!(profile = %key, "resolved browser profile");
+            key
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "could not read the browser command line");
+            "default".to_string()
+        }
+    }
+}
+
+fn dispatch(env: &Envelope, shared: &Shared, profile_override: Option<&str>) -> Result<Vec<Envelope>> {
     let browser = env
         .src
         .as_ref()
         .map(|s| s.browser.as_str())
         .unwrap_or("unknown");
-    let profile = env
-        .src
-        .as_ref()
-        .map(|s| s.profile_key.as_str())
-        .unwrap_or("default");
+    // The relay stamps a placeholder; the resolved value wins when we have one.
+    let profile = profile_override.unwrap_or_else(|| {
+        env.src
+            .as_ref()
+            .map(|s| s.profile_key.as_str())
+            .unwrap_or("default")
+    });
 
     // Message kind and counts only - never URLs or titles (docs/06).
     tracing::debug!(kind = %env.kind, browser, "message received");
