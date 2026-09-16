@@ -218,12 +218,30 @@ pub fn build_private_payload(
     })
 }
 
-/// A browser the restore needs running, and the executable that starts it.
+/// A browser the restore needs running, and how to start it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserLaunch {
     /// The id the extension reports in `hello`, e.g. `edge`.
     pub browser: String,
     pub exe_path: String,
+    /// The command line it was captured with, when one is usable.
+    ///
+    /// This is what restores the *profile*. A browser started from its bare executable
+    /// opens whichever profile it opens by default, so a session captured in a second
+    /// profile came back in the first one - and the offer, which is keyed by profile,
+    /// then went unclaimed. The profile argument lives on the command line, and
+    /// `profile_key` cannot stand in for it: it is a hash, deliberately, because a
+    /// profile path can contain the user's name.
+    pub command_line: Option<String>,
+}
+
+/// True when a redacted command line must not be replayed.
+///
+/// A redacted argument is stored as a length-preserving sentinel so restore can tell
+/// "no arguments" from "arguments we refused to keep". Passing the sentinel to the
+/// browser would be passing it a literal `<redacted:24>`.
+fn is_replayable(command_line: &str) -> bool {
+    !command_line.contains("<redacted:")
 }
 
 /// The browser id the extension will report for an executable we captured.
@@ -291,16 +309,22 @@ pub fn browsers_to_launch(
         .filter_map(|p| browser_id_for_exe(&p).map(str::to_string))
         .collect();
 
-    // Where each browser lives, from the snapshot that recorded it.
-    let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let paths: Vec<String> = stmt
-        .query_map([snapshot_id], |r| r.get::<_, String>(0))?
+    drop(stmt);
+
+    // Where each browser lives and how it was started, from the snapshot that recorded it.
+    let mut stmt = db.conn.prepare(
+        "SELECT exe_path, command_line FROM apps
+         WHERE snapshot_id = ?1 AND is_browser = 1 AND exe_path IS NOT NULL",
+    )?;
+    let rows: Vec<(String, Option<String>)> = stmt
+        .query_map([snapshot_id], |r| Ok((r.get(0)?, r.get(1)?)))?
         .filter_map(Result::ok)
         .collect();
     drop(stmt);
 
-    for exe_path in paths {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (exe_path, command_line) in rows {
         let Some(browser) = browser_id_for_exe(&exe_path) else {
             continue;
         };
@@ -313,6 +337,7 @@ pub fn browsers_to_launch(
         out.push(BrowserLaunch {
             browser: browser.to_string(),
             exe_path,
+            command_line: command_line.filter(|c| is_replayable(c)),
         });
     }
     Ok(out)

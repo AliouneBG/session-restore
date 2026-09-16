@@ -27,6 +27,71 @@ pub struct CaptureStats {
 /// Authoritative: apps and windows absent from this pass are removed, because unlike
 /// the browser there is no event stream telling us a window closed. Browser windows
 /// are deliberately left alone - the extension owns those rows.
+/// The documents each application has open, keyed by `app_key`.
+///
+/// Collected across ALL of an application's windows. Taking them from whichever window
+/// happened to come first meant an app with three windows recorded documents only if
+/// the first one had a resolvable title - Notepad with three notes open would record
+/// none.
+pub fn documents_by_app(
+    found: &[windows::CapturedWindow],
+    recent: &HashMap<String, std::path::PathBuf>,
+) -> HashMap<String, Vec<String>> {
+    let mut docs_by_app: HashMap<String, Vec<String>> = HashMap::new();
+    for w in found {
+        if w.is_browser {
+            continue;
+        }
+        let p = &w.process;
+        let key = identity::app_key(p.kind, p.exe_path.as_deref(), p.aumid.as_deref());
+        let entry = docs_by_app.entry(key).or_default();
+
+        for d in &p.documents {
+            if !entry.contains(d) {
+                entry.push(d.clone());
+            }
+        }
+        if let Some(title) = w.title.as_deref() {
+            if let Some(path) = documents::resolve_from_title(title, recent) {
+                let folded = identity::fold_env(&path.display().to_string());
+                if !entry.contains(&folded) {
+                    entry.push(folded);
+                }
+            }
+        }
+    }
+    docs_by_app
+}
+
+/// What is open right now: every application with a window, and the documents it has.
+///
+/// The restore path asks this to avoid starting something that is already running, and
+/// to tell which of an application's documents are *missing* rather than assuming all
+/// or none of them are. Derived the same way a capture derives them, deliberately: if
+/// the two disagreed, a restore would reopen a document the user already has open.
+pub fn open_now() -> HashMap<String, Vec<String>> {
+    let Ok(found) = windows::enumerate() else {
+        return HashMap::new();
+    };
+    let recent = documents::recent_index();
+    let mut out = documents_by_app(&found, &recent);
+
+    // An application with no documents still counts as open.
+    for w in &found {
+        if w.is_browser {
+            continue;
+        }
+        let p = &w.process;
+        out.entry(identity::app_key(
+            p.kind,
+            p.exe_path.as_deref(),
+            p.aumid.as_deref(),
+        ))
+        .or_default();
+    }
+    out
+}
+
 pub fn capture_into_live(db: &Db) -> Result<CaptureStats> {
     let found = windows::enumerate()?;
     let monitors = displays::enumerate()?;
@@ -73,33 +138,7 @@ pub fn capture_into_live(db: &Db) -> Result<CaptureStats> {
         )?;
     }
 
-    // Documents are collected across ALL of an application's windows before its row is
-    // written. Taking them from whichever window happened to come first meant an app
-    // with three windows recorded documents only if the first one had a resolvable
-    // title - Notepad with three notes open would record none.
-    let mut docs_by_app: HashMap<String, Vec<String>> = HashMap::new();
-    for w in &found {
-        if w.is_browser {
-            continue;
-        }
-        let p = &w.process;
-        let key = identity::app_key(p.kind, p.exe_path.as_deref(), p.aumid.as_deref());
-        let entry = docs_by_app.entry(key).or_default();
-
-        for d in &p.documents {
-            if !entry.contains(d) {
-                entry.push(d.clone());
-            }
-        }
-        if let Some(title) = w.title.as_deref() {
-            if let Some(path) = documents::resolve_from_title(title, &recent) {
-                let folded = identity::fold_env(&path.display().to_string());
-                if !entry.contains(&folded) {
-                    entry.push(folded);
-                }
-            }
-        }
-    }
+    let docs_by_app = documents_by_app(&found, &recent);
 
     let mut seen_apps: HashSet<String> = HashSet::new();
     let mut seen_windows: HashSet<String> = HashSet::new();

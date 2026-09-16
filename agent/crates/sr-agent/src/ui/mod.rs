@@ -363,8 +363,33 @@ fn apply_choice(
     let db = Arc::clone(db);
     std::thread::spawn(move || {
         for b in &browsers {
-            match crate::restore::launch::launch_via_shell(&b.exe_path) {
-                Ok(_) => tracing::info!(browser = %b.browser, "started for restore"),
+            // The command line first, because it carries the profile. Falling back to
+            // the bare executable matters: a stored command line can name a profile
+            // directory that no longer exists, and a browser open on the wrong profile
+            // is a far better outcome than one that did not start at all.
+            let via_command_line = b
+                .command_line
+                .as_deref()
+                .map(|cmd| crate::restore::launch::launch_with_command_line(cmd, None));
+
+            let result = match via_command_line {
+                Some(Ok(l)) => Ok(l),
+                Some(Err(e)) => {
+                    tracing::warn!(
+                        browser = %b.browser, error = %e,
+                        "stored command line would not start; falling back to the executable"
+                    );
+                    crate::restore::launch::launch_via_shell(&b.exe_path)
+                }
+                None => crate::restore::launch::launch_via_shell(&b.exe_path),
+            };
+
+            match result {
+                Ok(_) => tracing::info!(
+                    browser = %b.browser,
+                    with_profile = b.command_line.is_some(),
+                    "started for restore"
+                ),
                 Err(e) => tracing::warn!(browser = %b.browser, error = %e, "could not start"),
             }
         }

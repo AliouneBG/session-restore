@@ -143,29 +143,67 @@ pub fn restore_apps(
 ) -> AppRestoreReport {
     let mut report = AppRestoreReport::default();
     let mut launched_pids: HashMap<String, Option<u32>> = HashMap::new();
-    let running = running_app_keys();
+    let open_now = open_applications();
 
     // Phase 1-3: launch, cheapest and most exact first, staggered.
     for app in apps {
-        // Already open: place its windows, but do not start it again.
+        // Already open: do not start it again, but reopen whichever of its documents
+        // are missing.
         //
-        // `--undo` is what made this unavoidable. It restores the applications that
-        // were open before a restore, and they usually still are, so undoing produced
-        // a second VS Code and a second Discord rather than putting anything back.
-        // The same applied to ticking an already-running application in the review
-        // window.
+        // `--undo` is what made the first half unavoidable. It restores the
+        // applications that were open before a restore, and they usually still are, so
+        // undoing produced a second VS Code and a second Discord rather than putting
+        // anything back. Ticking an already-running application in the review window
+        // did the same.
         //
-        // The trade-off is real: an application with three stored windows and one open
-        // does not get the other two back. Launching it again would not have opened
-        // them either - almost everything here is single-instance and a second launch
-        // just focuses the first - so the choice is between a missing window and a
-        // duplicate process, and the duplicate is the one the user has to clean up.
-        // Placement matches live windows by application identity, not by what this
-        // function launched, so a skipped application is still placed.
-        if running.contains(&app.app_key) && app.tier != Tier::D {
-            report
-                .skipped
-                .push((app.display_name.clone(), "already running".into()));
+        // The second half is the part a blanket skip got wrong. Notepad open with one
+        // note, and two in the snapshot, is not "already restored" - one document is
+        // missing and reopening it is both possible and what the user asked for.
+        // Comparing against what is open is what makes that safe: reopening a document
+        // that is already open would raise a second window on the same file.
+        //
+        // What is still lost: an application with three *undifferentiated* windows and
+        // one open does not get the other two back. A window has no command line - the
+        // process does - so nothing recorded says how to recreate window two. Starting
+        // the application again would not have opened them either, and would leave a
+        // duplicate process behind. Placement matches live windows by application
+        // identity rather than by what this function launched, so the windows that do
+        // exist are still moved to where they were.
+        // Tier D is excluded so it reaches the branch below, which has the better
+        // reason to give ("needs admin") than "already running".
+        let already_open = match open_now.get(&app.app_key) {
+            Some(open) if app.tier != Tier::D => Some(open),
+            _ => None,
+        };
+        if let Some(already_open) = already_open {
+            let missing = missing_documents(&app.documents, already_open);
+            if missing.is_empty() {
+                report
+                    .skipped
+                    .push((app.display_name.clone(), "already running".into()));
+                continue;
+            }
+            if dry_run {
+                report.launched.push(app.display_name.clone());
+                continue;
+            }
+
+            let mut opened = 0usize;
+            for doc in &missing {
+                if launch::launch_via_shell(doc).is_ok() {
+                    opened += 1;
+                }
+                std::thread::sleep(Duration::from_millis(150));
+            }
+            if opened > 0 {
+                report.launched.push(app.display_name.clone());
+            } else {
+                report.failed.push((
+                    app.display_name.clone(),
+                    format!("{} document(s) could not be reopened", missing.len()),
+                ));
+            }
+            std::thread::sleep(STAGGER);
             continue;
         }
 
@@ -257,32 +295,33 @@ pub fn restore_apps(
     report
 }
 
-/// Applications that already have a window open.
+/// Applications that already have a window open, and the documents they have.
 ///
 /// Read from live windows rather than by enumerating processes: an application with no
 /// window cannot show the user anything, so starting it is what they asked for.
 #[cfg(windows)]
-fn running_app_keys() -> std::collections::HashSet<String> {
-    use crate::watcher::{identity, windows as winwatch};
-    let Ok(live) = winwatch::enumerate() else {
-        // Failing open means a duplicate at worst; failing closed would silently
-        // restore nothing at all.
-        return std::collections::HashSet::new();
-    };
-    live.iter()
-        .map(|w| {
-            identity::app_key(
-                w.process.kind,
-                w.process.exe_path.as_deref(),
-                w.process.aumid.as_deref(),
-            )
-        })
-        .collect()
+fn open_applications() -> HashMap<String, Vec<String>> {
+    crate::watcher::open_now()
 }
 
+/// Failing open means a duplicate at worst; failing closed would restore nothing.
 #[cfg(not(windows))]
-fn running_app_keys() -> std::collections::HashSet<String> {
-    std::collections::HashSet::new()
+fn open_applications() -> HashMap<String, Vec<String>> {
+    HashMap::new()
+}
+
+/// Stored documents that are not currently open.
+///
+/// Compared case-insensitively: both sides are env-folded, but Windows paths differ in
+/// case for the same file, and reopening a document the user already has open would
+/// raise a second window on it.
+fn missing_documents(stored: &[String], already_open: &[String]) -> Vec<String> {
+    let open: Vec<String> = already_open.iter().map(|d| d.to_lowercase()).collect();
+    stored
+        .iter()
+        .filter(|d| !open.contains(&d.to_lowercase()))
+        .cloned()
+        .collect()
 }
 
 /// Waits for launched applications' windows to appear, then places them.
@@ -430,5 +469,42 @@ mod tests {
         ];
         let r = restore_apps(&apps, &[], true);
         assert_eq!(r.launched.len() + r.skipped.len() + r.failed.len(), apps.len());
+    }
+
+    /// The case a blanket "already running -> skip" got wrong: Notepad open with one
+    /// note and two in the snapshot is not already restored.
+    #[test]
+    fn only_the_documents_that_are_not_open_are_reopened() {
+        let stored = vec![
+            r"%USERPROFILE%\Documents\one.txt".to_string(),
+            r"%USERPROFILE%\Documents\two.txt".to_string(),
+        ];
+        let open = vec![r"%USERPROFILE%\Documents\one.txt".to_string()];
+
+        assert_eq!(
+            missing_documents(&stored, &open),
+            vec![r"%USERPROFILE%\Documents\two.txt".to_string()]
+        );
+    }
+
+    /// Reopening a document that is already open raises a second window on the file,
+    /// and Windows spells the same path with different case all the time.
+    #[test]
+    fn an_open_document_is_recognised_whatever_its_case() {
+        let stored = vec![r"%USERPROFILE%\Documents\Notes.TXT".to_string()];
+        let open = vec![r"%userprofile%\documents\notes.txt".to_string()];
+        assert!(missing_documents(&stored, &open).is_empty());
+    }
+
+    #[test]
+    fn an_application_with_every_document_open_has_nothing_to_reopen() {
+        let docs = vec![r"%USERPROFILE%\a.txt".to_string()];
+        assert!(missing_documents(&docs, &docs).is_empty());
+    }
+
+    #[test]
+    fn an_application_with_no_documents_has_nothing_to_reopen() {
+        assert!(missing_documents(&[], &[]).is_empty());
+        assert!(missing_documents(&[], &[r"%USERPROFILE%\a.txt".to_string()]).is_empty());
     }
 }

@@ -550,12 +550,16 @@ fn live_tab(db: &Db, tab_key: &str) {
 
 /// Seeds a browser application row, the way a desktop capture would.
 fn browser_app(db: &Db, snapshot_id: i64, key: &str, exe: &str) {
+    browser_app_with(db, snapshot_id, key, exe, None);
+}
+
+fn browser_app_with(db: &Db, snapshot_id: i64, key: &str, exe: &str, cmd: Option<&str>) {
     db.conn
         .execute(
             "INSERT OR REPLACE INTO apps (snapshot_id, app_key, kind, exe_path, display_name,
-             is_browser, restore_tier)
-             VALUES (?1, ?2, 'win32', ?3, 'browser', 1, 'A')",
-            rusqlite::params![snapshot_id, key, exe],
+             command_line, is_browser, restore_tier)
+             VALUES (?1, ?2, 'win32', ?3, 'browser', ?4, 1, 'A')",
+            rusqlite::params![snapshot_id, key, exe, cmd],
         )
         .unwrap();
 }
@@ -755,4 +759,66 @@ fn a_browser_with_nothing_stored_opens_no_run() {
         .query_row("SELECT COUNT(*) FROM restore_runs", [], |r| r.get(0))
         .unwrap();
     assert_eq!(runs, 0, "opened a restore run with nothing to restore");
+}
+
+/// The profile lives on the command line and nowhere else: `profile_key` is a hash,
+/// deliberately, so it cannot be turned back into a launch argument. Without this a
+/// session captured in a second profile came back in the first one, and the offer -
+/// which is keyed by profile - went unclaimed.
+#[test]
+fn a_browser_is_started_with_the_profile_it_was_captured_in() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    let db = h.shared.db.lock().unwrap();
+    let snapshot_id: i64 = db
+        .conn
+        .query_row("SELECT MAX(id) FROM snapshots", [], |r| r.get(0))
+        .unwrap();
+
+    browser_app_with(
+        &db,
+        snapshot_id,
+        "app-chrome",
+        r"C:\Program Files\Chrome\chrome.exe",
+        Some(r#""C:\Program Files\Chrome\chrome.exe" --profile-directory="Profile 2""#),
+    );
+
+    let wanted: std::collections::HashSet<String> = ["w-old".to_string()].into_iter().collect();
+    let plan = sr_agent::restore::browsers_to_launch(&db, snapshot_id, &wanted).unwrap();
+
+    assert_eq!(plan.len(), 1);
+    let cmd = plan[0]
+        .command_line
+        .as_deref()
+        .expect("no command line, so the profile is lost");
+    assert!(cmd.contains("--profile-directory=\"Profile 2\""), "got {cmd}");
+}
+
+/// A redacted command line must never be replayed: the sentinel is not an argument.
+#[test]
+fn a_redacted_command_line_is_not_replayed() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    let db = h.shared.db.lock().unwrap();
+    let snapshot_id: i64 = db
+        .conn
+        .query_row("SELECT MAX(id) FROM snapshots", [], |r| r.get(0))
+        .unwrap();
+
+    browser_app_with(
+        &db,
+        snapshot_id,
+        "app-chrome",
+        r"C:\Program Files\Chrome\chrome.exe",
+        Some(r#""C:\Program Files\Chrome\chrome.exe" --auth=<redacted:24>"#),
+    );
+
+    let wanted: std::collections::HashSet<String> = ["w-old".to_string()].into_iter().collect();
+    let plan = sr_agent::restore::browsers_to_launch(&db, snapshot_id, &wanted).unwrap();
+
+    assert_eq!(plan.len(), 1, "the browser must still be started");
+    assert!(
+        plan[0].command_line.is_none(),
+        "would have passed a redaction sentinel to the browser: {:?}",
+        plan[0].command_line
+    );
+    assert!(plan[0].exe_path.ends_with("chrome.exe"), "no fallback to start with");
 }

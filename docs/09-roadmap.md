@@ -77,6 +77,14 @@ listed below.
 - The privacy scan repeated against that data, control included: it **finds**
   `rust-lang.org` and `example.com` in `sessions.db`, and finds **zero** traces of
   either private tab's URL or title anywhere in the data directory
+- A browser restarted into the profile it was captured in, proved the hard way: Edge
+  had been started with `--load-extension`, so the extension loads *only* if that
+  argument is replayed. Launching the bare executable produced no connection at all;
+  launching the stored command line produced `extension connected` one second later,
+  then an offer of 3 tabs, all restored
+- Only the missing document reopened: a snapshot recording two documents against a
+  Notepad that had one open reopened the absent one and left the open one alone, while
+  Code, Discord, Calculator and Windows Terminal were all skipped as already running
 
 ### Known gaps
 
@@ -90,11 +98,16 @@ listed below.
 - `--undo` re-places the previous windows but never closes what a restore opened.
   Closing applications to undo risks destroying work done since, which is worse than a
   few extra windows.
-- A restore does not put a browser back into the profile it was captured from. It
-  starts the browser, which opens whichever profile that browser opens by default.
-- An application that is already open is placed but not restarted, so one with three
-  stored windows and one open does not get the other two back. Starting it again would
-  not have opened them either, and would have left a duplicate process behind.
+- An application that is already open has its *documents* reopened but is not
+  restarted, so one with several undifferentiated windows and one open does not get the
+  others back. A window has no command line - the process does - so nothing recorded
+  says how to recreate window two. This is a data limit, not an implementation one:
+  closing it needs per-application knowledge (VS Code's `--folder-uri` and the like).
+- Documents are resolved from window titles, so a document in a *background tab* of a
+  tabbed application is invisible. Notepad with two tabs reports only the active one,
+  which means a restore can reopen a document that was already open in a tab. Notepad
+  focuses it rather than duplicating it, so the effect is benign, but the detection is
+  not complete.
 - Command lines come from a PEB read. ETW (the intended primary source) is not wired
   up, so processes are read one at a time rather than cached as they start.
 - Virtual desktop membership is not captured; see [08](08-agent.md) for why the public
