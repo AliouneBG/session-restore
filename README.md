@@ -149,7 +149,26 @@ optimization. If it never ran, the design still holds.
 
 ## Install
 
-Windows 11. Build both halves, then register the agent.
+Windows 11.
+
+### From a release build
+
+```powershell
+.\scripts\package.ps1          # builds everything into dist.\dist\SessionRestore-0.1.0\sr-setup.exe
+```
+
+The installer is per-user and **never asks for administrator**, because nothing in
+Session Restore uses one. It copies itself to
+`%LOCALAPPDATA%\Programs\SessionRestore`, registers the browsers and the logon task,
+adds a Start Menu entry and an Apps and Features entry, then starts the agent, which
+walks you through the rest.
+
+To remove it, use Apps and Features, or `sr-setup.exe --uninstall`. Captured sessions
+are kept unless you add `--purge`.
+
+`--silent` suppresses the dialogs, for unattended deployment.
+
+### From source
 
 ### 1. Prerequisites
 
@@ -420,6 +439,7 @@ Never edit the generated file.
 | [07-extension.md](docs/07-extension.md) | Extension spec, Chrome, Edge and Firefox differences |
 | [08-agent.md](docs/08-agent.md) | Windows agent internals |
 | [09-roadmap.md](docs/09-roadmap.md) | Milestones, what is verified by running it, known gaps |
+| [10-distribution.md](docs/10-distribution.md) | Packaging, the installer, signing, store submission |
 | [adr/](docs/adr/) | Decision records, the reasoning behind the contested choices |
 
 Six decisions are written up as ADRs because they were the contested ones: a logon
@@ -442,8 +462,10 @@ Working and verified by running it, not only by tests:
 
 Not done:
 
-- **No installer and no code signing.** The agent runs from its build directory, and
-  SmartScreen will warn on another machine.
+- **No code signing.** The installer and binaries are unsigned, so SmartScreen will
+  warn on any machine that did not build them. A certificate is a purchase, not a build
+  step; `package.ps1 -Sign` is wired up and waiting for one. See
+  [10-distribution.md](docs/10-distribution.md).
 - Firefox add-on is not signed, so it is a temporary add-on for now.
 - **The extension is not on any store yet**, so it has to be loaded unpacked. An
   installer cannot install it for you: Chrome and Edge removed silent external

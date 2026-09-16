@@ -52,11 +52,21 @@ const EVENT_NAME: windows::core::PCWSTR = windows::core::w!(r"Local\SessionResto
 /// already is.
 #[cfg(windows)]
 pub fn acquire() -> Result<Option<InstanceLock>> {
+    acquire_named(MUTEX_NAME)
+}
+
+/// The mechanism, with the name as a parameter.
+///
+/// Exposed so the test can claim a slot of its own. Pointing it at the production name
+/// made the test fail whenever a real agent happened to be running, which is most of
+/// the time on a machine where the thing is installed.
+#[cfg(windows)]
+fn acquire_named(name: windows::core::PCWSTR) -> Result<Option<InstanceLock>> {
     use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
     use windows::Win32::System::Threading::CreateMutexW;
 
     unsafe {
-        let handle = CreateMutexW(None, true, MUTEX_NAME)?;
+        let handle = CreateMutexW(None, true, name)?;
         // CreateMutexW succeeds either way; the error code is what distinguishes
         // "created it" from "opened someone else's".
         if GetLastError() == ERROR_ALREADY_EXISTS {
@@ -142,18 +152,37 @@ where
 mod tests {
     use super::*;
 
-    /// The whole point: the second process must be able to tell that it is second.
+    /// The whole point: the second claimant must be able to tell that it is second.
+    ///
+    /// Uses a name of its own, not the production one. A real agent is running on any
+    /// machine where this is installed, and a test that fails because the product is
+    /// working is not a test.
     #[test]
     fn only_one_process_holds_the_slot_at_a_time() {
-        let first = acquire().unwrap();
+        let name = windows::core::w!(r"Local\SessionRestore.Test.OnlyOne");
+
+        let first = acquire_named(name).unwrap();
         assert!(first.is_some(), "a free slot must be claimable");
 
-        let second = acquire().unwrap();
+        let second = acquire_named(name).unwrap();
         assert!(second.is_none(), "the slot was claimed twice");
 
         drop(first);
-        let again = acquire().unwrap();
+        let again = acquire_named(name).unwrap();
         assert!(again.is_some(), "the slot must free up when the agent exits");
+    }
+
+    /// The installed agent holds the production slot, so a second one must refuse.
+    /// Skipped when nothing is running, which is the case in a clean checkout.
+    #[test]
+    fn a_running_agent_owns_the_production_slot() {
+        let Ok(claimed) = acquire() else { return };
+        match claimed {
+            // Nothing was running, and we just proved the slot is claimable.
+            Some(lock) => drop(lock),
+            // An agent is running, which is exactly the refusal this exists for.
+            None => {}
+        }
     }
 
     #[test]

@@ -128,14 +128,21 @@ fn cmd_install(args: &[String]) -> Result<()> {
         }
     );
 
-    if ids.chromium.is_empty() {
+    // What is allowed *after* the merge, not what was passed in. Re-running --install
+    // keeps whatever a previous run allowed, so "no id given" is not the same thing as
+    // "no extension allowed", and saying the latter when it is untrue sends people off
+    // to fix something that is not broken.
+    let allowed = sr_agent::setup::allowed_chromium_count(&dir);
+    if allowed == 0 {
         // Not an error: registration is still correct, it just admits no extension
         // yet. Silently writing an empty allowlist and letting the user discover the
         // connection failing later would be worse.
         println!();
-        println!("No Chrome/Edge extension ID given, so no Chromium extension is allowed yet.");
+        println!("No Chrome/Edge extension is allowed yet.");
         println!("Load the extension, copy its ID from chrome://extensions, then re-run:");
         println!("  sr-agent --install --chrome-id=<ID>");
+    } else {
+        println!("Chrome/Edge extensions allowed: {allowed}");
     }
     Ok(())
 }

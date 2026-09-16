@@ -1,0 +1,22 @@
+[package]
+name = "sr-setup"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Per-user installer for Session Restore"
+
+# No admin, by design. Everything Session Restore touches is per-user: its data
+# directory, its registry keys, its scheduled task (ADR-0001). An installer that asked
+# for elevation would be asking for a privilege the product never uses.
+[dependencies]
+anyhow = { workspace = true }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Registry",
+  "Win32_UI_WindowsAndMessaging",
+]

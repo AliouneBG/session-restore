@@ -43,6 +43,59 @@ pub const BROWSERS: &[BrowserReg] = &[
     },
 ];
 
+/// Adds back what a previous install allowed, without duplicating anything.
+///
+/// Re-running `--install` is the normal upgrade path, and the installer runs it with
+/// no ids at all because it has none to give: an unpacked extension's id is derived
+/// from its path and is only known after a browser has loaded it once. Overwriting the
+/// allowlist with an empty one silently disconnected an extension that had been
+/// working, and nothing said so except tabs quietly no longer being captured.
+fn merge_allowed(mut wanted: Vec<String>, existing: Vec<String>) -> Vec<String> {
+    for e in existing {
+        if !wanted.contains(&e) {
+            wanted.push(e);
+        }
+    }
+    wanted
+}
+
+/// How many Chrome/Edge extensions the installed manifest admits.
+///
+/// Read back from the file rather than counted from what was passed in, because
+/// `install` merges with what was already there.
+pub fn allowed_chromium_count(data_dir: &Path) -> usize {
+    let Some(chrome) = BROWSERS.iter().find(|b| b.name == "chrome") else {
+        return 0;
+    };
+    existing_allowed(&data_dir.join(chrome.manifest_file), Dialect::Origins).len()
+}
+
+/// What a manifest already allows, so re-registering never revokes it.
+///
+/// A missing or unreadable manifest yields nothing, which is the same as a fresh
+/// install and is the right answer for a file we cannot parse.
+fn existing_allowed(manifest_path: &Path, dialect: Dialect) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(manifest_path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let key = match dialect {
+        Dialect::Origins => "allowed_origins",
+        Dialect::Extensions => "allowed_extensions",
+    };
+    value
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dialect {
     Origins,
@@ -152,9 +205,17 @@ pub fn install(data_dir: &Path, ids: &Ids) -> Result<Vec<String>> {
                     .iter()
                     .map(|id| format!("chrome-extension://{id}/"))
                     .collect();
+
+                let list = merge_allowed(list, existing_allowed(&manifest_path, b.dialect));
                 (Some(list), None)
             }
-            Dialect::Extensions => (None, Some(ids.firefox.clone())),
+            Dialect::Extensions => {
+                let list = merge_allowed(
+                    ids.firefox.clone(),
+                    existing_allowed(&manifest_path, b.dialect),
+                );
+                (None, Some(list))
+            }
         };
 
         let manifest = HostManifest {
@@ -358,6 +419,58 @@ fn delete_registry_key(_r: &str, _k: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// An upgrade must never revoke an extension that was working. The installer
+    /// re-runs registration with no ids, because it has none to give.
+    #[test]
+    fn an_upgrade_with_no_ids_keeps_what_was_already_allowed() {
+        let existing = vec!["chrome-extension://abcdefghijklmnopabcdefghijklmnop/".to_string()];
+        let merged = merge_allowed(vec![], existing.clone());
+        assert_eq!(merged, existing, "the upgrade revoked a working extension");
+    }
+
+    #[test]
+    fn a_reinstall_with_the_same_id_does_not_duplicate_it() {
+        let id = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/".to_string();
+        let merged = merge_allowed(vec![id.clone()], vec![id.clone()]);
+        assert_eq!(merged, vec![id]);
+    }
+
+    #[test]
+    fn a_new_id_is_added_alongside_the_old_one() {
+        let old = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/".to_string();
+        let new = "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/".to_string();
+        let merged = merge_allowed(vec![new.clone()], vec![old.clone()]);
+        assert_eq!(merged.len(), 2);
+        assert!(merged.contains(&old) && merged.contains(&new));
+    }
+
+    #[test]
+    fn what_a_manifest_allows_is_read_back_from_it() {
+        let dir = std::env::temp_dir().join(format!("sr-manifest-{}", sr_proto::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("m.json");
+        std::fs::write(
+            &path,
+            r#"{"allowed_origins":["chrome-extension://zzzz/"],"allowed_extensions":["a@b"]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            existing_allowed(&path, Dialect::Origins),
+            vec!["chrome-extension://zzzz/".to_string()]
+        );
+        assert_eq!(existing_allowed(&path, Dialect::Extensions), vec!["a@b".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_absent_or_unreadable_manifest_allows_nothing_rather_than_failing() {
+        let missing = std::path::Path::new(r"C:
+ope
+othing-here.json");
+        assert!(existing_allowed(missing, Dialect::Origins).is_empty());
+    }
+
     use super::*;
 
     #[test]
