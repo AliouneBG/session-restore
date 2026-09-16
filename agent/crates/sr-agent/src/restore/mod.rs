@@ -20,6 +20,9 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RestoreTab {
+    /// Not sent to the extension - used only to match a review selection.
+    #[serde(skip)]
+    pub tab_key: String,
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -82,7 +85,7 @@ pub fn build_payload(
     let mut out = Vec::new();
     for (window_id, state, x, y, w, h) in windows {
         let mut ts = db.conn.prepare(
-            "SELECT url, title, tab_index, pinned, active, group_key
+            "SELECT url, title, tab_index, pinned, active, group_key, tab_key
              FROM tabs
              WHERE snapshot_id = ?1 AND browser_window_id = ?2 AND restorable = 1
              ORDER BY tab_index",
@@ -96,6 +99,7 @@ pub fn build_payload(
                     pinned: r.get::<_, i64>(3)? != 0,
                     active: r.get::<_, i64>(4)? != 0,
                     group_key: r.get(5)?,
+                    tab_key: r.get(6)?,
                 })
             })?
             .filter_map(Result::ok)
@@ -179,7 +183,7 @@ pub fn build_private_payload(
                 continue;
             }
             let dek = keys.dek_by_id(db, key_id)?;
-            let plain = unseal(&dek, &aad(snapshot_id, &tab_key, key_id), &nonce, &ciphertext)?;
+            let plain = unseal(&dek, &aad(&tab_key, key_id), &nonce, &ciphertext)?;
             let payload: crate::ingest::PrivatePayload = serde_json::from_slice(&plain)?;
             tabs.push(RestoreTab {
                 url: payload.url,
@@ -188,6 +192,7 @@ pub fn build_private_payload(
                 pinned: payload.pinned,
                 active: payload.active,
                 group_key: None,
+                tab_key: tab_key.clone(),
             });
         }
 

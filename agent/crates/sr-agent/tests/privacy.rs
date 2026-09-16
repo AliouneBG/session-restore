@@ -319,3 +319,41 @@ fn upsert_updates_rather_than_duplicates() {
         .unwrap();
     assert_eq!(url, "https://ordinary.test/second-page");
 }
+
+#[test]
+fn a_private_tab_survives_being_snapshotted() {
+    // The review window reads private tabs from a *snapshot*, not from live state.
+    // Snapshots copy rows to a new snapshot_id, so anything that binds the ciphertext
+    // to the id it was sealed under stops decrypting the moment it is copied - and the
+    // failure is silent, because a private tab that will not decrypt just does not
+    // appear.
+    use sr_agent::store::snapshot;
+    use sr_agent::ui::review;
+
+    let dir = TempDir::new();
+    let db = Db::open(&dir.path().join("sessions.db")).unwrap();
+    let keys = KeyManager::new(dir.path());
+    db.set_setting("capture_private_windows", "true").unwrap();
+
+    db.conn
+        .execute(
+            "INSERT INTO browser_windows (snapshot_id, browser_window_id, browser,
+             profile_key, is_private, updated_at) VALUES (0,'w-priv','chrome','default',1,0)",
+            [],
+        )
+        .unwrap();
+
+    let ctx = IngestCtx::live(&db, &keys);
+    ingest_tab(&private_tab("w-priv:t1"), &ctx).unwrap();
+
+    let snap = snapshot::create_from_live(&db, "shutdown", None).unwrap().unwrap();
+
+    let revealed = review::reveal_private(&db, &keys, snap)
+        .expect("reveal_private failed outright");
+    let tabs: usize = revealed.iter().map(|w| w.tabs.len()).sum();
+    assert_eq!(
+        tabs, 1,
+        "a private tab could not be decrypted after being copied into a snapshot"
+    );
+    assert_eq!(revealed[0].tabs[0].url, SECRET_URL);
+}

@@ -19,6 +19,9 @@ use std::sync::{Arc, Mutex};
 pub struct UiContext {
     pub db: Arc<Mutex<Db>>,
     pub keys: Arc<KeyManager>,
+    /// Shared with the pipe server, so a decision made here governs what browsers are
+    /// offered when they connect.
+    pub shared: Arc<crate::server::Shared>,
     /// The snapshot offered for restore, if there is one.
     pub pending_snapshot: Option<i64>,
     /// Whether to open the review window as soon as the agent starts.
@@ -91,6 +94,7 @@ pub fn run_app(ctx: UiContext) -> Result<()> {
     let db = ctx.db;
     let keys = ctx.keys;
     let pending = ctx.pending_snapshot;
+    let shared = ctx.shared;
 
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -196,7 +200,7 @@ pub fn run_app(ctx: UiContext) -> Result<()> {
                             // screen while applications launch behind it looks broken.
                             review_window = None;
                             review_snapshot = None;
-                            apply_choice(&db, &keys, snapshot_id, &choice);
+                            apply_choice(&db, &keys, &shared, snapshot_id, &choice);
                         }
                     }
 
@@ -252,9 +256,21 @@ fn open_review(
 fn apply_choice(
     db: &Arc<Mutex<Db>>,
     _keys: &Arc<KeyManager>,
+    shared: &Arc<crate::server::Shared>,
     snapshot_id: i64,
     choice: &review::ReviewChoice,
 ) {
+    // Record the browser half first, so a browser that connects while applications are
+    // still launching already knows what the user chose.
+    {
+        let mut pending = shared.pending_restore.lock().unwrap();
+        pending.set_selection(crate::server::BrowserSelection {
+            windows: choice.browser_windows.iter().cloned().collect(),
+            tabs: choice.tabs.iter().cloned().collect(),
+            declined: !choice.confirmed,
+        });
+    }
+
     if choice.never_ask_again {
         let db = db.lock().unwrap();
         let _ = db.set_setting("restore_mode", "off");

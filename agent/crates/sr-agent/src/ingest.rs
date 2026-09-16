@@ -167,7 +167,7 @@ fn store_private_encrypted(tab: &TabDelta, ctx: &IngestCtx) -> Result<()> {
         muted: tab.muted,
     };
     let plaintext = serde_json::to_vec(&payload)?;
-    let sealed = seal(&dek, &aad(ctx.snapshot_id, &tab.tab_key, key_id), &plaintext)?;
+    let sealed = seal(&dek, &aad(&tab.tab_key, key_id), &plaintext)?;
 
     let now = sr_proto::now_millis();
     let expires_at = now + ctx.private_ttl_hours * 3600 * 1000;

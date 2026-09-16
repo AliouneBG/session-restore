@@ -87,14 +87,37 @@
       details.tabs > summary::before { content: "▸ "; }
       details.tabs[open] > summary::before { content: "▾ "; }
       ul.tablist { margin: 2px 0 6px; padding: 0 0 0 40px; }
-      ul.tablist li {
+      ul.tablist { padding-left: 26px; }
+      ul.tablist li.tabrow {
         list-style: none;
-        color: var(--muted);
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        padding: 2px 0;
+        min-width: 0;
+      }
+      ul.tablist li.tabrow label {
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+        min-width: 0;
+        flex: 1;
+        cursor: pointer;
+      }
+      .tabtitle {
         font-size: 12.5px;
-        padding: 1px 0;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        max-width: 60%;
+      }
+      .taburl {
+        color: var(--muted);
+        font-size: 11.5px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        flex: 1;
       }
       .private {
         border: 1px solid var(--warn-line);
@@ -186,12 +209,25 @@
           html += "<h2>Applications</h2>";
           for (const a of data.apps) {
             const id = "app-" + esc(a.app_key);
+
+            // Say which documents come back, not just how many windows. "2 unsaved"
+            // is deliberate: the title of an unsaved document is its content, so
+            // there is nothing safe to show and a count is the honest description.
+            const bits = [];
+            if (a.documents.length) bits.push(a.documents.map(esc).join(", "));
+            if (a.untitled_windows) {
+              bits.push(`${a.untitled_windows} unsaved`);
+            }
+            if (!bits.length) {
+              bits.push(`${a.windows} window${a.windows === 1 ? "" : "s"}`);
+            }
+
             html += `<div class="row">
               <input type="checkbox" id="${id}" data-app="${esc(a.app_key)}"
                      ${a.restorable ? "checked" : "disabled"} />
               <label for="${id}">
                 <span class="name">${esc(a.name)}</span>
-                <span class="detail">${a.windows} window${a.windows === 1 ? "" : "s"}</span>
+                <span class="detail">${bits.join(" &middot; ")}</span>
               </label>
               <span class="tier ${a.restorable ? "" : "warn"}">${esc(a.tier_note)}</span>
             </div>`;
@@ -203,6 +239,9 @@
           for (const w of data.browser_windows) {
             const id = "win-" + esc(w.window_id);
             const label = w.browser.charAt(0).toUpperCase() + w.browser.slice(1);
+            // Tabs are listed by name and individually selectable. A window is a
+            // blunt unit - people want yesterday's research back without the twenty
+            // tabs they were done with.
             html += `<div class="row">
               <input type="checkbox" id="${id}" data-window="${esc(w.window_id)}" checked />
               <label for="${id}">
@@ -210,9 +249,22 @@
                 <span class="detail">${w.tabs.length} tab${w.tabs.length === 1 ? "" : "s"}</span>
               </label>
             </div>
-            <details class="tabs"><summary>show tabs</summary><ul class="tablist">
-              ${w.tabs.map((t) => `<li>${esc(t.title || shortUrl(t.url))}</li>`).join("")}
-            </ul></details>`;
+            <ul class="tablist">
+              ${w.tabs
+                .map((t) => {
+                  const tid = "tab-" + esc(t.tab_key);
+                  return `<li class="tabrow">
+                    <input type="checkbox" id="${tid}"
+                           data-tab="${esc(t.tab_key)}"
+                           data-in-window="${esc(w.window_id)}" checked />
+                    <label for="${tid}" title="${esc(t.url)}">
+                      <span class="tabtitle">${esc(t.title || shortUrl(t.url))}</span>
+                      <span class="taburl">${esc(shortUrl(t.url))}</span>
+                    </label>
+                  </li>`;
+                })
+                .join("")}
+            </ul>`;
           }
         }
 
@@ -243,6 +295,30 @@
 
         const showBtn = document.getElementById("showpriv");
         if (showBtn) showBtn.addEventListener("click", onShowPrivate);
+
+        // A window checkbox is a shortcut for all of its tabs, and a window with no
+        // tabs left selected is itself deselected - otherwise "restore" would open an
+        // empty window.
+        for (const box of document.querySelectorAll("input[data-window]")) {
+          box.addEventListener("change", () => {
+            for (const t of document.querySelectorAll(
+              `input[data-in-window="${CSS.escape(box.dataset.window)}"]`,
+            )) {
+              t.checked = box.checked;
+            }
+          });
+        }
+        for (const tab of document.querySelectorAll("input[data-tab]")) {
+          tab.addEventListener("change", () => {
+            const win = tab.dataset.inWindow;
+            const siblings = [
+              ...document.querySelectorAll(`input[data-in-window="${CSS.escape(win)}"]`),
+            ];
+            const anyOn = siblings.some((s) => s.checked);
+            const box = document.querySelector(`input[data-window="${CSS.escape(win)}"]`);
+            if (box) box.checked = anyOn;
+          });
+        }
       }
 
       function onShowPrivate() {
@@ -288,11 +364,15 @@
         const windows = [...document.querySelectorAll("input[data-window]:checked")].map(
           (el) => el.dataset.window,
         );
+        const tabs = [...document.querySelectorAll("input[data-tab]:checked")].map(
+          (el) => el.dataset.tab,
+        );
         const priv = document.getElementById("priv");
         return {
           action: "choose",
           apps,
           browser_windows: windows,
+          tabs,
           restore_private: !!(priv && priv.checked),
           never_ask_again: !!neverAsk,
           confirmed: !!confirmed,

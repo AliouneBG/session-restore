@@ -6,7 +6,7 @@
 
 #![cfg(windows)]
 
-use sr_agent::server::{serve_on, PendingRestore, Shared};
+use sr_agent::server::{serve_on, BrowserSelection, PendingRestore, Shared};
 use sr_agent::store::db::Db;
 use sr_agent::store::keys::KeyManager;
 use sr_agent::store::snapshot;
@@ -321,4 +321,98 @@ fn private_windows_are_never_part_of_an_automatic_offer() {
     for w in offer.body["windows"].as_array().unwrap() {
         assert_eq!(w["private"], false);
     }
+}
+
+
+#[test]
+fn a_review_selection_limits_which_windows_are_offered() {
+    // The review window shows per-window checkboxes. If the offer ignored them, the
+    // checkboxes would be decoration.
+    let h = Harness::with_previous_session(&[
+        ("w-old:t1", "https://one.test/"),
+        ("w-old:t2", "https://two.test/"),
+    ]);
+    h.shared
+        .pending_restore
+        .lock()
+        .unwrap()
+        .set_selection(BrowserSelection {
+            windows: ["some-other-window".to_string()].into_iter().collect(),
+            tabs: Default::default(),
+            declined: false,
+        });
+
+    let mut c = h.connect();
+    send(&mut c, hello("chrome"));
+    assert_eq!(recv(&mut c).kind, "hello_ack");
+
+    // The stored window was not selected, so nothing is offered at all.
+    send(&mut c, hello("chrome"));
+    assert_eq!(recv(&mut c).kind, "hello_ack", "offered an unselected window");
+}
+
+#[test]
+fn a_review_selection_limits_which_tabs_are_offered() {
+    let h = Harness::with_previous_session(&[
+        ("w-old:t1", "https://keep.test/"),
+        ("w-old:t2", "https://drop.test/"),
+        ("w-old:t3", "https://also-drop.test/"),
+    ]);
+    h.shared
+        .pending_restore
+        .lock()
+        .unwrap()
+        .set_selection(BrowserSelection {
+            windows: ["w-old".to_string()].into_iter().collect(),
+            tabs: ["w-old:t1".to_string()].into_iter().collect(),
+            declined: false,
+        });
+
+    let mut c = h.connect();
+    send(&mut c, hello("chrome"));
+    let _ = recv(&mut c);
+    let offer = recv(&mut c);
+
+    assert_eq!(offer.kind, "restore_session");
+    let tabs = offer.body["windows"][0]["tabs"].as_array().unwrap();
+    assert_eq!(tabs.len(), 1, "unselected tabs were offered anyway");
+    assert_eq!(tabs[0]["url"], "https://keep.test/");
+}
+
+#[test]
+fn declining_the_review_declines_the_tabs_too() {
+    // Saying no has to mean no to everything, not just the applications.
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    h.shared
+        .pending_restore
+        .lock()
+        .unwrap()
+        .set_selection(BrowserSelection {
+            windows: Default::default(),
+            tabs: Default::default(),
+            declined: true,
+        });
+
+    let mut c = h.connect();
+    send(&mut c, hello("chrome"));
+    assert_eq!(recv(&mut c).kind, "hello_ack");
+
+    send(&mut c, hello("chrome"));
+    assert_eq!(recv(&mut c).kind, "hello_ack", "offered a declined restore");
+}
+
+#[test]
+fn with_no_review_answer_the_whole_session_is_offered() {
+    // No selection means the user was never asked - the historical behaviour, and the
+    // right default when there is no review to consult.
+    let h = Harness::with_previous_session(&[
+        ("w-old:t1", "https://one.test/"),
+        ("w-old:t2", "https://two.test/"),
+    ]);
+
+    let mut c = h.connect();
+    send(&mut c, hello("chrome"));
+    let _ = recv(&mut c);
+    let offer = recv(&mut c);
+    assert_eq!(offer.body["windows"][0]["tabs"].as_array().unwrap().len(), 2);
 }

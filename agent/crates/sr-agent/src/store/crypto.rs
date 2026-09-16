@@ -57,13 +57,22 @@ impl Dek {
     }
 }
 
-/// Binds a ciphertext to the exact row it belongs to.
+/// Binds a ciphertext to the tab it belongs to.
 ///
-/// Without this, someone with write access to the .db could move a blob to a different
-/// tab_key or snapshot and we would decrypt it happily in the wrong context. Cheap to
+/// Without this, someone with write access to the .db could move a blob onto a
+/// different `tab_key` and we would decrypt it happily in the wrong context. Cheap to
 /// add, and it turns a silent integrity failure into a loud decryption error.
-pub fn aad(snapshot_id: i64, tab_key: &str, key_id: i64) -> Vec<u8> {
-    format!("{snapshot_id}\u{0}{tab_key}\u{0}{key_id}").into_bytes()
+///
+/// **`snapshot_id` is deliberately NOT part of the binding.** It was, and that was a
+/// bug: taking a snapshot copies private rows to a new `snapshot_id`, so every one of
+/// them became undecryptable the moment it was copied. The failure was silent in the
+/// worst way - the review window asked for private tabs, every decrypt failed, and it
+/// displayed an empty list as though there were none.
+///
+/// Binding to the tab is what the check is actually for. The same tab's data appearing
+/// under several snapshot ids is our own copying, not an attacker relocating a blob.
+pub fn aad(tab_key: &str, key_id: i64) -> Vec<u8> {
+    format!("{tab_key}\u{0}{key_id}").into_bytes()
 }
 
 pub struct Sealed {
@@ -268,17 +277,27 @@ mod tests {
         // The regression AAD exists to prevent: a blob relocated to another tab_key
         // must not decrypt in its new home.
         let dek = Dek::generate();
-        let real = aad(0, "w1:t1", 1);
-        let moved = aad(0, "w1:t2", 1);
-        let s = seal(&dek, &real, b"https://x.test/").unwrap();
-        assert!(open(&dek, &moved, &s.nonce, &s.ciphertext).is_err());
+        let s = seal(&dek, &aad("w1:t1", 1), b"https://x.test/").unwrap();
+        assert!(open(&dek, &aad("w1:t2", 1), &s.nonce, &s.ciphertext).is_err());
     }
 
     #[test]
-    fn changing_snapshot_id_breaks_decryption() {
+    fn a_row_copied_into_a_snapshot_still_decrypts() {
+        // The bug this replaced: binding to snapshot_id meant taking a snapshot made
+        // every private tab undecryptable, and the review window showed an empty list
+        // rather than an error.
         let dek = Dek::generate();
-        let s = seal(&dek, &aad(0, "w1:t1", 1), b"u").unwrap();
-        assert!(open(&dek, &aad(7, "w1:t1", 1), &s.nonce, &s.ciphertext).is_err());
+        let s = seal(&dek, &aad("w1:t1", 1), b"https://x.test/").unwrap();
+        // Same tab, different snapshot - our own copy, not an attacker.
+        let out = open(&dek, &aad("w1:t1", 1), &s.nonce, &s.ciphertext).unwrap();
+        assert_eq!(out, b"https://x.test/");
+    }
+
+    #[test]
+    fn a_row_sealed_under_another_key_does_not_decrypt() {
+        let dek = Dek::generate();
+        let s = seal(&dek, &aad("w1:t1", 1), b"u").unwrap();
+        assert!(open(&dek, &aad("w1:t1", 2), &s.nonce, &s.ciphertext).is_err());
     }
 
     #[test]

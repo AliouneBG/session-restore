@@ -34,6 +34,21 @@ pub struct Shared {
 pub struct PendingRestore {
     pub snapshot_id: Option<i64>,
     offered: std::collections::HashSet<String>,
+    /// What the user ticked in the review window, once they have answered.
+    ///
+    /// `None` means they have not been asked yet (or the review is disabled), in which
+    /// case the whole stored session is offered. That is the historical behaviour and
+    /// stays the default when there is no review to consult.
+    selection: Option<BrowserSelection>,
+}
+
+/// The browser half of a review decision.
+#[derive(Default, Clone)]
+pub struct BrowserSelection {
+    pub windows: std::collections::HashSet<String>,
+    pub tabs: std::collections::HashSet<String>,
+    /// True when the user declined outright, as opposed to selecting nothing yet.
+    pub declined: bool,
 }
 
 impl PendingRestore {
@@ -41,7 +56,17 @@ impl PendingRestore {
         PendingRestore {
             snapshot_id,
             offered: std::collections::HashSet::new(),
+            selection: None,
         }
+    }
+
+    /// Records what the review window decided for browser windows and tabs.
+    pub fn set_selection(&mut self, selection: BrowserSelection) {
+        self.selection = Some(selection);
+    }
+
+    pub fn selection(&self) -> Option<BrowserSelection> {
+        self.selection.clone()
     }
 
     /// Claims the offer for one browser/profile, yielding the snapshot to restore.
@@ -447,13 +472,21 @@ fn reap_missing_for_browser(db: &Db, body: &StateBody, browser: &str, profile: &
 /// they require an explicit, current confirmation (ADR-0004), which this code path has
 /// no way to obtain.
 fn maybe_offer_restore(shared: &Shared, browser: &str, profile: &str) -> Result<Option<Envelope>> {
-    let snapshot_id = {
+    let (snapshot_id, selection) = {
         let mut pending = shared.pending_restore.lock().unwrap();
+        let selection = pending.selection();
         match pending.claim(browser, profile) {
-            Some(id) => id,
+            Some(id) => (id, selection),
             None => return Ok(None),
         }
     };
+
+    // The user was asked and said no. Declining in the review has to mean declining
+    // the tabs too, not just the applications.
+    if selection.as_ref().map(|s| s.declined).unwrap_or(false) {
+        tracing::info!(browser, "restore declined in the review window");
+        return Ok(None);
+    }
 
     let db = shared.db.lock().unwrap();
 
@@ -468,7 +501,20 @@ fn maybe_offer_restore(shared: &Shared, browser: &str, profile: &str) -> Result<
     }
 
     let run_id = crate::restore::begin_run(&db, snapshot_id, &mode)?;
-    let body = crate::restore::build_payload(&db, snapshot_id, browser, profile, run_id)?;
+    let mut body = crate::restore::build_payload(&db, snapshot_id, browser, profile, run_id)?;
+
+    // Honour the review's per-window and per-tab choices. Without this the review
+    // could show tab checkboxes that did nothing, which is worse than not offering
+    // them at all.
+    if let Some(sel) = selection.as_ref() {
+        body.windows.retain(|w| sel.windows.contains(&w.window_id));
+        if !sel.tabs.is_empty() {
+            for w in body.windows.iter_mut() {
+                w.tabs.retain(|t| sel.tabs.contains(&t.tab_key));
+            }
+            body.windows.retain(|w| !w.tabs.is_empty());
+        }
+    }
 
     if body.windows.is_empty() {
         tracing::debug!(browser, "nothing stored for this browser; no offer");

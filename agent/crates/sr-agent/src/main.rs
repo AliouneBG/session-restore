@@ -664,6 +664,7 @@ fn run() -> Result<()> {
     sr_agent::ui::run_app(sr_agent::ui::UiContext {
         db,
         keys,
+        shared: Arc::clone(&shared),
         pending_snapshot: pending,
         review_at_start,
     })

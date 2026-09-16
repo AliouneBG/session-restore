@@ -25,12 +25,23 @@ pub struct ReviewApp {
     pub tier_note: String,
     pub windows: usize,
     pub restorable: bool,
+    /// File names this app had open, so the row says *which* documents come back
+    /// rather than just "3 windows".
+    pub documents: Vec<String>,
+    /// Windows with nothing identifiable open - an unsaved note, a blank editor.
+    ///
+    /// Counted rather than named. The title of an unsaved document is its *content*
+    /// (Windows 11 Notepad puts the first line there), so there is nothing safe to
+    /// show, and "2 unsaved" is the honest description.
+    pub untitled_windows: usize,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ReviewTab {
     pub url: String,
     pub title: String,
+    /// Stable within this review, so the page can name exactly which tabs to keep.
+    pub tab_key: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -69,6 +80,10 @@ pub struct ReviewChoice {
     pub apps: Vec<String>,
     #[serde(default)]
     pub browser_windows: Vec<String>,
+    /// Individual tabs the user kept ticked. Empty means "every tab in the selected
+    /// windows", which is what an untouched review means.
+    #[serde(default)]
+    pub tabs: Vec<String>,
     #[serde(default)]
     pub restore_private: bool,
     #[serde(default)]
@@ -106,7 +121,11 @@ pub fn collect(db: &Db, snapshot_id: i64) -> Result<ReviewData> {
     let mut stmt = db.conn.prepare(
         "SELECT a.app_key, COALESCE(a.display_name, '?'), a.restore_tier, a.kind,
                 (SELECT COUNT(*) FROM windows w
-                 WHERE w.snapshot_id = a.snapshot_id AND w.app_key = a.app_key)
+                 WHERE w.snapshot_id = a.snapshot_id AND w.app_key = a.app_key),
+                a.documents,
+                (SELECT COUNT(*) FROM windows w
+                 WHERE w.snapshot_id = a.snapshot_id AND w.app_key = a.app_key
+                   AND w.title IS NULL)
          FROM apps a
          WHERE a.snapshot_id = ?1 AND a.is_browser = 0
          ORDER BY a.restore_tier, a.display_name",
@@ -115,6 +134,18 @@ pub fn collect(db: &Db, snapshot_id: i64) -> Result<ReviewData> {
         .query_map([snapshot_id], |r| {
             let tier: String = r.get(2)?;
             let kind: String = r.get(3)?;
+            let documents: Vec<String> = r
+                .get::<_, Option<String>>(5)?
+                .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|p| {
+                    std::path::Path::new(p)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                })
+                .collect();
+
             Ok(ReviewApp {
                 app_key: r.get(0)?,
                 name: r.get(1)?,
@@ -122,6 +153,8 @@ pub fn collect(db: &Db, snapshot_id: i64) -> Result<ReviewData> {
                 restorable: tier != "D",
                 tier,
                 windows: r.get::<_, i64>(4)? as usize,
+                documents,
+                untitled_windows: r.get::<_, i64>(6)? as usize,
             })
         })?
         .filter_map(Result::ok)
@@ -142,7 +175,7 @@ pub fn collect(db: &Db, snapshot_id: i64) -> Result<ReviewData> {
     let mut browser_windows = Vec::new();
     for (window_id, browser, profile) in windows {
         let mut ts = db.conn.prepare(
-            "SELECT url, COALESCE(title, '') FROM tabs
+            "SELECT url, COALESCE(title, ''), tab_key FROM tabs
              WHERE snapshot_id = ?1 AND browser_window_id = ?2 AND restorable = 1
              ORDER BY tab_index",
         )?;
@@ -151,6 +184,7 @@ pub fn collect(db: &Db, snapshot_id: i64) -> Result<ReviewData> {
                 Ok(ReviewTab {
                     url: r.get(0)?,
                     title: r.get(1)?,
+                    tab_key: r.get(2)?,
                 })
             })?
             .filter_map(Result::ok)
@@ -243,13 +277,26 @@ pub fn reveal_private(
 
     let mut by_window: std::collections::BTreeMap<String, Vec<ReviewTab>> = Default::default();
     for (window_id, tab_key, nonce, ciphertext, key_id) in rows {
-        let dek = keys.dek_by_id(db, key_id)?;
-        let plain = unseal(&dek, &aad(snapshot_id, &tab_key, key_id), &nonce, &ciphertext)?;
-        let payload: crate::ingest::PrivatePayload = serde_json::from_slice(&plain)?;
-        by_window.entry(window_id).or_default().push(ReviewTab {
-            title: payload.title.unwrap_or_default(),
-            url: payload.url,
-        });
+        // One unreadable row must not hide the rest. A row sealed under a key that has
+        // since been rotated out, or written by an older build, should cost its own
+        // line and nothing more - previously any single failure aborted the whole
+        // reveal and the window showed an empty list.
+        let decoded = keys
+            .dek_by_id(db, key_id)
+            .and_then(|dek| unseal(&dek, &aad(&tab_key, key_id), &nonce, &ciphertext))
+            .and_then(|plain| {
+                serde_json::from_slice::<crate::ingest::PrivatePayload>(&plain)
+                    .map_err(anyhow::Error::from)
+            });
+
+        match decoded {
+            Ok(payload) => by_window.entry(window_id).or_default().push(ReviewTab {
+                title: payload.title.unwrap_or_default(),
+                url: payload.url,
+                tab_key,
+            }),
+            Err(e) => tracing::warn!(error = %e, "a private tab could not be decrypted"),
+        }
     }
 
     Ok(by_window
