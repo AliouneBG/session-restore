@@ -5,7 +5,7 @@
  * global; only `attach()` touches the browser.
  */
 
-import { isRestorable } from "../shared/normalize.js";
+import { extractPlaceholderTarget, isRestorable } from "../shared/normalize.js";
 import type {
   BrowserWindowDelta,
   TabDelta,
@@ -35,10 +35,27 @@ export function groupKey(windowId: number, groupId: number): string {
 /** Chrome's sentinel for "this tab is not in a group". */
 const TAB_GROUP_ID_NONE = -1;
 
+/** Returns the page a lazy placeholder stands for, or null for any other URL. */
+function unwrapPlaceholder(raw: string): string | null {
+  if (!raw.startsWith("chrome-extension://") && !raw.startsWith("moz-extension://")) {
+    return null;
+  }
+  try {
+    return extractPlaceholderTarget(new URL(raw));
+  } catch {
+    return null;
+  }
+}
+
 export function tabToDelta(t: chrome.tabs.Tab): TabDelta | null {
   if (t.id === undefined || t.id < 0 || t.windowId === undefined) return null;
 
-  const url = t.url ?? t.pendingUrl ?? "";
+  // A tab still showing our lazy placeholder represents the page it stands for, not
+  // the placeholder itself. Storing the placeholder would mean that rebooting twice
+  // before opening a restored tab saves a placeholder-of-a-placeholder, and the real
+  // URL would drift further out of reach with each cycle.
+  const raw = t.url ?? t.pendingUrl ?? "";
+  const url = unwrapPlaceholder(raw) ?? raw;
   const gid = (t as { groupId?: number }).groupId;
 
   return {

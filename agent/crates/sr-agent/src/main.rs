@@ -5,9 +5,10 @@
 
 use anyhow::{Context, Result};
 use sr_agent::ingest::sweep_expired_private;
-use sr_agent::server::{serve, Shared};
+use sr_agent::server::{serve, PendingRestore, Shared};
 use sr_agent::store::db::Db;
 use sr_agent::store::keys::KeyManager;
+use sr_agent::store::snapshot;
 use sr_agent::{data_dir, AGENT_VERSION};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -132,15 +133,23 @@ fn cmd_status() -> Result<()> {
     let db_path = dir.join("sessions.db");
     if db_path.exists() {
         let db = Db::open(&db_path)?;
-        let tabs: i64 = db
-            .conn
-            .query_row("SELECT COUNT(*) FROM tabs", [], |r| r.get(0))?;
-        let private: i64 = db
-            .conn
-            .query_row("SELECT COUNT(*) FROM tabs_private", [], |r| r.get(0))?;
-        let windows: i64 = db
-            .conn
-            .query_row("SELECT COUNT(*) FROM browser_windows", [], |r| r.get(0))?;
+        // Live state only. Counting every snapshot as well reported "9 tabs in 3
+        // windows" for a browser showing three, which reads as a capture bug.
+        let tabs: i64 = db.conn.query_row(
+            "SELECT COUNT(*) FROM tabs WHERE snapshot_id = ?1",
+            [sr_agent::store::db::LIVE],
+            |r| r.get(0),
+        )?;
+        let private: i64 = db.conn.query_row(
+            "SELECT COUNT(*) FROM tabs_private WHERE snapshot_id = ?1",
+            [sr_agent::store::db::LIVE],
+            |r| r.get(0),
+        )?;
+        let windows: i64 = db.conn.query_row(
+            "SELECT COUNT(*) FROM browser_windows WHERE snapshot_id = ?1",
+            [sr_agent::store::db::LIVE],
+            |r| r.get(0),
+        )?;
         println!("Tabs tracked:    {tabs} in {windows} windows");
         println!("Private tabs:    {private} (encrypted)");
         println!(
@@ -151,6 +160,21 @@ fn cmd_status() -> Result<()> {
                 "off"
             }
         );
+        println!("Restore mode:    {}", db.setting("restore_mode")?.unwrap_or_default());
+
+        let snaps = snapshot::list(&db, 5)?;
+        if snaps.is_empty() {
+            println!("Snapshots:       none");
+        } else {
+            println!("Snapshots:");
+            for s in snaps {
+                let age_s = (sr_proto::now_millis() - s.captured_at) / 1000;
+                println!(
+                    "  #{:<4} {:<10} {:>3} tabs, {:>2} apps   {}s ago",
+                    s.id, s.kind, s.tab_count, s.app_count, age_s
+                );
+            }
+        }
     } else {
         println!("Database:        not created yet");
     }
@@ -175,9 +199,40 @@ fn run() -> Result<()> {
         Err(e) => tracing::warn!(error = %e, "startup sweep failed"),
     }
 
+    // Snapshot the previous session BEFORE the pipe server starts.
+    //
+    // The live rows still describe the last session, which is exactly what we want to
+    // restore - but the browser comes back with new window ids, and its first
+    // reconcile is authoritative, so it reaps every row whose window no longer exists.
+    // That reap is correct and it would delete the session moments before we restore
+    // it. Ordering is the whole defence: no extension can connect until this is done.
+    let pending = match snapshot::create_from_live(&db, "shutdown", Some("previous session")) {
+        Ok(Some(id)) => {
+            let tabs: i64 = db
+                .conn
+                .query_row("SELECT tab_count FROM snapshots WHERE id = ?1", [id], |r| r.get(0))
+                .unwrap_or(0);
+            tracing::info!(snapshot_id = id, tabs, "captured the previous session");
+            Some(id)
+        }
+        Ok(None) => {
+            tracing::info!("no previous session to restore");
+            None
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "could not snapshot the previous session");
+            None
+        }
+    };
+
+    if let Err(e) = snapshot::prune(&db, db.setting_i64("snapshot_retention_count", 20)) {
+        tracing::warn!(error = %e, "snapshot prune failed");
+    }
+
     let shared = Arc::new(Shared {
         db: Mutex::new(db),
         keys,
+        pending_restore: Mutex::new(PendingRestore::new(pending)),
     });
 
     let sweeper = Arc::clone(&shared);

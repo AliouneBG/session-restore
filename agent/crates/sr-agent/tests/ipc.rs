@@ -7,7 +7,7 @@
 
 #![cfg(windows)]
 
-use sr_agent::server::{serve_on, Shared};
+use sr_agent::server::{serve_on, PendingRestore, Shared};
 use sr_agent::store::db::Db;
 use sr_agent::store::keys::KeyManager;
 use sr_proto::frame::{read_frame, write_frame, MAX_INBOUND_BYTES, MAX_OUTBOUND_BYTES};
@@ -32,6 +32,7 @@ impl Harness {
         let shared = Arc::new(Shared {
             db: Mutex::new(db),
             keys,
+            pending_restore: Mutex::new(PendingRestore::new(None)),
         });
 
         // Unique name per test so a real agent (or a parallel test) is never contended.

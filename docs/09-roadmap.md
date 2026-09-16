@@ -7,14 +7,14 @@
 | M0 — Walking skeleton | **Done.** Verified against real Edge end to end. |
 | M1 — Capture, tabs, T1 reconcile | **Done** for Chrome/Edge. Live tabs land in SQLite with title, order, active flag, pinned state, and window geometry. |
 | M2 — Apps and windows | Not started. No `EnumWindows` watcher yet. |
-| M3 — Restore | Planner and executor written and unit-tested; **never run against a browser**. |
+| M3 — Restore | **Browser half done.** A reboot cycle restores tabs into a real browser, adding only what is missing. App restore is still M2 work. |
 | M4 — T0 deltas / T2 shutdown | T0 event deltas done. T2 shutdown hook not written. |
 | M5 — Private windows | Storage, crypto, TTL and the chokepoint are done and tested; the **two-stage opt-in has not been exercised with a real private window**. |
 | M6 — Firefox | Builds and manifests exist; **not yet loaded in Firefox**. |
 | M7 — Polish | Not started. No installer, no tray, no review UI. |
 
-Roughly M0, M1, and half of M4/M5 are real. The honest summary is that **capture works
-and restore is unproven**.
+Roughly M0, M1, the browser half of M3, and half of M4/M5 are real. The honest summary
+is that **browser sessions survive a reboot; applications do not exist yet**.
 
 ### Verified by running it, not just by tests
 
@@ -22,13 +22,21 @@ and restore is unproven**.
 - Closing a tab removes it from the store within seconds
 - Two consecutive browser restarts leave exactly one window, no phantoms
 - A known private URL never appears in any byte of any file the agent writes
+- A full reboot cycle: capture 3 tabs, shut down, restart, reopen the browser with a
+  different single tab -> the 2 missing tabs are restored and the one already open is
+  left alone, with no duplicates
+- Restored tabs store their real URLs rather than the lazy placeholder, so the session
+  survives repeated reboots instead of degrading
 
 ### Known gaps
 
 - `profile_key` is hardcoded to `"default"`, so two profiles of the same browser merge.
   Needs the command-line machinery from M2.
 - No tray, no review window; `--status` is the only UI.
-- Restore has no `pre_restore` snapshot or undo yet.
+- A `pre_restore` snapshot is taken on every restore, but nothing consumes it yet -
+  there is no Undo action.
+- Restore is offered automatically; `restore_mode = ask` is stored and honoured only as
+  "off or not", because there is no review UI to ask with.
 - Firefox untested.
 
 ## Build order

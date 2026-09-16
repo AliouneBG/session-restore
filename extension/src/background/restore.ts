@@ -72,6 +72,19 @@ export async function applyRestore(body: RestoreSessionBody): Promise<RestoreRes
     }
   }
 
+  // Report tabs that were already open, so the audit trail accounts for every tab in
+  // the offer rather than leaving them stuck at "pending" forever.
+  for (const w of body.windows) {
+    for (const t of w.tabs) {
+      const planned =
+        plan.addToExisting.some((p) => p.tab === t) ||
+        plan.newWindows.some((n) => n.tabs.includes(t));
+      if (!planned) {
+        results.push({ tab_key: t.url, status: "already_open" });
+      }
+    }
+  }
+
   for (const { tab, targetWindowRef } of plan.addToExisting) {
     if (targetWindowRef === null) continue;
     try {

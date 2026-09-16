@@ -17,6 +17,40 @@ use std::sync::{Arc, Mutex};
 pub struct Shared {
     pub db: Mutex<Db>,
     pub keys: KeyManager,
+    /// The snapshot captured at startup, and who has already been offered it.
+    pub pending_restore: Mutex<PendingRestore>,
+}
+
+/// Tracks the one restore offer this agent run may make per browser and profile.
+///
+/// The guard matters more than it looks: MV3 service workers reconnect constantly, and
+/// every reconnect sends a fresh `hello`. Offering on each one would re-send the same
+/// session repeatedly. The extension's diff would suppress most of the damage, but
+/// "mostly idempotent" is not a property to lean on when the failure mode is duplicate
+/// tabs.
+#[derive(Default)]
+pub struct PendingRestore {
+    pub snapshot_id: Option<i64>,
+    offered: std::collections::HashSet<String>,
+}
+
+impl PendingRestore {
+    pub fn new(snapshot_id: Option<i64>) -> Self {
+        PendingRestore {
+            snapshot_id,
+            offered: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Claims the offer for one browser/profile, yielding the snapshot to restore.
+    /// Returns `None` when nothing is pending or it has already been offered.
+    fn claim(&mut self, browser: &str, profile: &str) -> Option<i64> {
+        let id = self.snapshot_id?;
+        if !self.offered.insert(format!("{browser}\u{1}{profile}")) {
+            return None;
+        }
+        Some(id)
+    }
 }
 
 /// Accepts connections forever on the current user's pipe. Each gets its own thread.
@@ -96,10 +130,11 @@ fn handle_connection(conn: sr_ipc::PipeConnection, shared: Arc<Shared>) -> Resul
         // `lastAccessed` as a fractional number) propagated out of dispatch and closed
         // the connection, so the extension silently stopped syncing.
         match dispatch(&env, &shared) {
-            Ok(Some(reply)) => {
-                write_frame(&mut writer, &serde_json::to_string(&reply)?, MAX_OUTBOUND_BYTES)?;
+            Ok(replies) => {
+                for reply in replies {
+                    write_frame(&mut writer, &serde_json::to_string(&reply)?, MAX_OUTBOUND_BYTES)?;
+                }
             }
-            Ok(None) => {}
             Err(e) => {
                 tracing::warn!(kind = %env.kind, error = %e, "message could not be handled");
             }
@@ -107,7 +142,7 @@ fn handle_connection(conn: sr_ipc::PipeConnection, shared: Arc<Shared>) -> Resul
     }
 }
 
-fn dispatch(env: &Envelope, shared: &Shared) -> Result<Option<Envelope>> {
+fn dispatch(env: &Envelope, shared: &Shared) -> Result<Vec<Envelope>> {
     let browser = env
         .src
         .as_ref()
@@ -148,7 +183,16 @@ fn dispatch(env: &Envelope, shared: &Shared) -> Result<Option<Envelope>> {
                 capture_private,
                 reconcile_interval_s: db.setting_i64("reconcile_interval_seconds", 60) as u32,
             };
-            Ok(Some(Envelope::new("hello_ack", serde_json::to_value(ack)?)))
+            let mut out = vec![Envelope::new("hello_ack", serde_json::to_value(ack)?)];
+            drop(db);
+
+            match maybe_offer_restore(shared, browser, profile) {
+                Ok(Some(offer)) => out.push(offer),
+                Ok(None) => {}
+                // A restore we cannot build must not stop capture from working.
+                Err(e) => tracing::warn!(error = %e, "could not build a restore offer"),
+            }
+            Ok(out)
         }
 
         "tab_delta" => {
@@ -159,7 +203,7 @@ fn dispatch(env: &Envelope, shared: &Shared) -> Result<Option<Envelope>> {
                 "tab_delta"
             );
             apply_state(&body, shared, false, browser, profile)?;
-            Ok(None)
+            Ok(vec![])
         }
 
         "full_state" => {
@@ -171,18 +215,23 @@ fn dispatch(env: &Envelope, shared: &Shared) -> Result<Option<Envelope>> {
                 "reconcile"
             );
             apply_state(&body, shared, true, browser, profile)?;
-            Ok(None)
+            Ok(vec![])
         }
 
         "restore_result" => {
-            tracing::info!(browser, "restore result received");
-            Ok(None)
+            let run_id = env.body.get("run_id").and_then(|v| v.as_i64()).unwrap_or(0);
+            let empty = serde_json::json!([]);
+            let items = env.body.get("items").unwrap_or(&empty);
+            let db = shared.db.lock().unwrap();
+            let (ok, failed) = crate::restore::apply_result(&db, run_id, items)?;
+            tracing::info!(browser, run_id, restored = ok, failed, "restore finished");
+            Ok(vec![])
         }
 
         other => {
             // Unknown types are ignored, not fatal: the extension may be newer.
             tracing::debug!(kind = other, "ignoring unknown message type");
-            Ok(None)
+            Ok(vec![])
         }
     }
 }
@@ -356,3 +405,55 @@ fn reap_missing_for_browser(db: &Db, body: &StateBody, browser: &str, profile: &
     Ok(())
 }
 
+
+/// Builds a `restore_session` offer for a browser that has just connected, if this
+/// agent run still owes one.
+///
+/// Only non-private windows. Private windows are never part of an automatic offer -
+/// they require an explicit, current confirmation (ADR-0004), which this code path has
+/// no way to obtain.
+fn maybe_offer_restore(shared: &Shared, browser: &str, profile: &str) -> Result<Option<Envelope>> {
+    let snapshot_id = {
+        let mut pending = shared.pending_restore.lock().unwrap();
+        match pending.claim(browser, profile) {
+            Some(id) => id,
+            None => return Ok(None),
+        }
+    };
+
+    let db = shared.db.lock().unwrap();
+
+    let mode = db
+        .setting("restore_mode")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "ask".to_string());
+    if mode == "off" {
+        tracing::info!("restore is disabled; not offering");
+        return Ok(None);
+    }
+
+    let run_id = crate::restore::begin_run(&db, snapshot_id, &mode)?;
+    let body = crate::restore::build_payload(&db, snapshot_id, browser, profile, run_id)?;
+
+    if body.windows.is_empty() {
+        tracing::debug!(browser, "nothing stored for this browser; no offer");
+        return Ok(None);
+    }
+
+    let tabs: usize = body.windows.iter().map(|w| w.tabs.len()).sum();
+    crate::restore::record_items(&db, run_id, &body)?;
+    tracing::info!(
+        browser,
+        run_id,
+        windows = body.windows.len(),
+        tabs,
+        snapshot_id,
+        "offering restore"
+    );
+
+    Ok(Some(Envelope::new(
+        "restore_session",
+        serde_json::to_value(body)?,
+    )))
+}
