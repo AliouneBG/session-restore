@@ -210,15 +210,23 @@
           for (const a of data.apps) {
             const id = "app-" + esc(a.app_key);
 
-            // Say which documents come back, not just how many windows. "2 unsaved"
-            // is deliberate: the title of an unsaved document is its content, so
-            // there is nothing safe to show and a count is the honest description.
+            // Name the documents that come back rather than counting windows.
+            //
+            // "unsaved" is only used for an app that *has* documents, where a window
+            // with no file really is an unsaved one. Calling Calculator's window
+            // "unsaved" would be nonsense - it never had a document to save. Those
+            // just get a window count.
+            //
+            // Unsaved windows are counted, never named: the title of an unsaved
+            // document is its content (Windows 11 Notepad puts the first line there),
+            // so a count is the only honest description.
             const bits = [];
-            if (a.documents.length) bits.push(a.documents.map(esc).join(", "));
-            if (a.untitled_windows) {
-              bits.push(`${a.untitled_windows} unsaved`);
-            }
-            if (!bits.length) {
+            if (a.documents.length) {
+              bits.push(a.documents.map(esc).join(", "));
+              if (a.untitled_windows) {
+                bits.push(`${a.untitled_windows} unsaved`);
+              }
+            } else {
               bits.push(`${a.windows} window${a.windows === 1 ? "" : "s"}`);
             }
 

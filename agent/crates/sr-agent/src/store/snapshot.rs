@@ -21,6 +21,12 @@ use anyhow::Result;
 use rusqlite::OptionalExtension;
 
 /// Tables that carry a `snapshot_id` and are copied wholesale.
+///
+/// The column lists are spelled out rather than using `SELECT *` so the copy cannot
+/// silently depend on column order. The cost is that a column added to the schema and
+/// not added here is dropped by every snapshot - which happened once with `documents`,
+/// and showed up only as the review window saying "unsaved" for a file it had. The
+/// test `every_column_is_copied` exists to make that impossible to repeat.
 const COPIED_TABLES: &[(&str, &str)] = &[
     (
         "browser_windows",
@@ -44,7 +50,7 @@ const COPIED_TABLES: &[(&str, &str)] = &[
     ),
     (
         "apps",
-        "app_key, kind, exe_path, aumid, display_name, icon_hash, command_line, working_dir, is_browser, restore_tier",
+        "app_key, kind, exe_path, aumid, display_name, icon_hash, command_line, working_dir, documents, is_browser, restore_tier",
     ),
     (
         "windows",
@@ -221,6 +227,46 @@ mod tests {
         let ctx = IngestCtx::live(db, keys);
         for i in 0..n {
             ingest_tab(&tab(&format!("w1:t{i}"), &format!("https://x.test/{i}")), &ctx).unwrap();
+        }
+    }
+
+    #[test]
+    fn every_column_is_copied() {
+        // A column added to the schema but forgotten here is dropped by every
+        // snapshot, silently. Restore reads from snapshots, so the data simply is not
+        // there when it matters - and nothing fails loudly.
+        let db = Db::open_in_memory().unwrap();
+
+        for (table, cols) in COPIED_TABLES {
+            let mut stmt = db
+                .conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let actual: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|c| c != "snapshot_id")
+                .collect();
+
+            let listed: Vec<String> = cols
+                .split(',')
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())
+                .collect();
+
+            for col in &actual {
+                assert!(
+                    listed.contains(col),
+                    "{table}.{col} exists in the schema but is not copied into snapshots"
+                );
+            }
+            for col in &listed {
+                assert!(
+                    actual.contains(col),
+                    "{table}.{col} is copied into snapshots but no longer exists"
+                );
+            }
         }
     }
 
