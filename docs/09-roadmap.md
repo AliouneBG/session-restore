@@ -9,7 +9,7 @@
 | M2 — Apps and windows | **Done.** Apps, windows, geometry, displays, tiers and redacted command lines land in SQLite. |
 | M3 — Restore | **Done.** Browsers get their missing tabs back; applications are relaunched by tier and their windows placed, including across a changed monitor layout or DPI. No review UI, so app restore is opt-in. |
 | M4 — T0 deltas / T2 shutdown | **Done.** Event deltas plus a `WM_QUERYENDSESSION` flush bounded at 2s. |
-| M5 — Private windows | **Done and verified with real private windows in Chrome and Edge.** |
+| M5 — Private windows | **Done and verified with real private windows in Chrome, Edge and Firefox.** |
 | M6 — Firefox | **Done.** Runs in Firefox, connects, captures. AMO lint clean: 0 errors, 0 warnings, 0 notices. |
 | M7 — Polish | **Tray, review window and logon task done.** No MSI/MSIX installer yet, and nothing is signed. |
 
@@ -42,9 +42,9 @@ listed below.
   browser permission absent, the extension reported `incognito_access=false` and
   captured zero private tabs
 - The review window renders the real session with per-app checkboxes and honest tiers
-- Private windows captured for real in **both Chrome and Edge**: the extension reported
-  `incognito_access=false`, then `true` after the browser permission was granted, and
-  two encrypted rows appeared from two different browsers
+- Private windows captured for real in **Chrome, Edge and Firefox**: in each, the
+  extension reported `incognito_access=false`, then `true` once the browser permission
+  was granted, and one encrypted row appeared per browser
 - The privacy scan run against that real data, with a control: it **finds** the
   plaintext normal-tab URLs in `sessions.db` and finds **zero** private ones
 - Document restore: Notepad closed, restored from a snapshot, and the document reopened
