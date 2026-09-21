@@ -637,6 +637,17 @@ fn apply_state(
                         profile_key, is_private, window_state, x, y, w, h, focused, updated_at)
                      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
                      ON CONFLICT(snapshot_id, browser_window_id) DO UPDATE SET
+                       -- profile_key is updated, and leaving it out was a bug.
+                       --
+                       -- The connection reporting it is the extension running inside
+                       -- that profile, so it is the authoritative answer. Keeping the
+                       -- first value ever written meant that when the key improved,
+                       -- from a guess derived from the shared browser process to the
+                       -- profile's own id, existing windows kept the old one forever.
+                       -- One profile's session then sat under two different keys, and
+                       -- since both the restore offer and the reconcile reap are scoped
+                       -- by profile, half of it became unreachable and unreapable.
+                       profile_key = excluded.profile_key,
                        is_private = excluded.is_private, window_state = excluded.window_state,
                        x = excluded.x, y = excluded.y, w = excluded.w, h = excluded.h,
                        focused = excluded.focused, updated_at = excluded.updated_at",

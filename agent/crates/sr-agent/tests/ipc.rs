@@ -549,3 +549,67 @@ fn several_browsers_can_be_connected_at_once() {
     assert_eq!(recv(&mut chrome).kind, "hello_ack");
     assert_eq!(recv(&mut firefox).kind, "hello_ack");
 }
+
+/// A window that already existed must adopt the profile its extension now reports.
+///
+/// The upsert used to leave `profile_key` alone on conflict. When the key improved,
+/// from a guess derived from the browser process to the profile's own id, existing
+/// windows kept the stale one. One profile's session then sat under two keys, and both
+/// the restore offer and the reconcile reap are scoped by profile, so half of it became
+/// unreachable and could never be cleaned up.
+#[test]
+fn an_existing_window_adopts_the_profile_its_extension_reports() {
+    let h = Harness::start();
+
+    // First contact, before the extension reported a profile of its own.
+    let mut c = h.connect();
+    send(&mut c, window_state("w1", "old-key-from-the-process"));
+    wait_for_window(&h, "w1", "old-key-from-the-process");
+
+    // The same window, now reported by an extension that knows its profile.
+    send(&mut c, window_state("w1", "ext:a-real-profile-id"));
+    wait_for_window(&h, "w1", "ext:a-real-profile-id");
+}
+
+fn window_state(window_id: &str, profile: &str) -> serde_json::Value {
+    serde_json::json!({
+        "v": 1, "id": sr_proto::new_id(), "type": "full_state", "ts": 0,
+        "src": { "browser": "chrome", "profile_key": profile, "ext_version": "0.1.0" },
+        "body": {
+            "windows": [{ "op": "upsert", "window_id": window_id, "focused": true,
+                          "private": false }],
+            "tabs": []
+        }
+    })
+}
+
+fn wait_for_window(h: &Harness, window_id: &str, expected_profile: &str) {
+    for _ in 0..60 {
+        {
+            let db = h.shared.db.lock().unwrap();
+            let got: Option<String> = db
+                .conn
+                .query_row(
+                    "SELECT profile_key FROM browser_windows
+                     WHERE snapshot_id = 0 AND browser_window_id = ?1",
+                    [window_id],
+                    |r| r.get(0),
+                )
+                .ok();
+            if got.as_deref() == Some(expected_profile) {
+                return;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let db = h.shared.db.lock().unwrap();
+    let got: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT profile_key FROM browser_windows WHERE snapshot_id = 0 AND browser_window_id = ?1",
+            [window_id],
+            |r| r.get(0),
+        )
+        .ok();
+    panic!("window {window_id} is under {got:?}, expected {expected_profile}");
+}
