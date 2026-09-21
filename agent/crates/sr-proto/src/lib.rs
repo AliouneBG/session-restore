@@ -189,6 +189,13 @@ pub struct HelloBody {
     pub ext_version: String,
     pub browser_version: String,
     pub incognito_access: bool,
+    /// An opaque per-profile id the extension generated and kept in `storage.local`.
+    ///
+    /// Optional because an older extension does not send one, and because Firefox does
+    /// not need it: it runs a separate process per profile, so the relay can already
+    /// tell them apart. Chromium cannot, which is what this exists for.
+    #[serde(default)]
+    pub profile_id: Option<String>,
     #[serde(default)]
     pub capabilities: Vec<String>,
 }

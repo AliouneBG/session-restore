@@ -195,6 +195,11 @@ CREATE TABLE IF NOT EXISTS browser_status (
   profile_key      TEXT NOT NULL,
   ext_version      TEXT,
   incognito_access INTEGER NOT NULL DEFAULT 0,
+  -- The Chromium profile *directory* (`Default`, `Profile 1`), which is the only
+  -- thing that can reopen a specific profile. profile_key cannot: it is a hash, on
+  -- purpose, because a profile path can contain the user's name. Only known-shaped
+  -- directory names are ever written here; see watcher::profiles.
+  profile_dir      TEXT,
   last_seen        INTEGER NOT NULL,
   PRIMARY KEY (browser, profile_key)
 );

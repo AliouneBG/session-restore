@@ -62,6 +62,7 @@ impl Db {
         // columns added after the first release need an explicit ALTER. Adding one
         // that is already there is an error, not a no-op, hence the check.
         self.add_column_if_missing("apps", "documents", "TEXT")?;
+        self.add_column_if_missing("browser_status", "profile_dir", "TEXT")?;
 
         let existing: Option<String> = self
             .conn

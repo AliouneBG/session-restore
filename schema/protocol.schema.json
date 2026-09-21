@@ -291,6 +291,10 @@
         "incognito_access": {
           "type": "boolean"
         },
+        "profile_id": {
+          "type": "string",
+          "description": "An opaque id the extension generated once and kept in storage.local, which is per-profile. Chromium runs ONE browser process for every profile, so the relay cannot tell profiles apart from the process that spawned it: every profile reports the same command line and they collapse into a single bucket. Only code running inside the profile can distinguish them. Carries nothing about the user: it is random, and it is not the profile path."
+        },
         "capabilities": {
           "type": "array",
           "items": {

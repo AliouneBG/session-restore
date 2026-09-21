@@ -340,6 +340,7 @@ fn a_review_selection_limits_which_windows_are_offered() {
             windows: ["some-other-window".to_string()].into_iter().collect(),
             tabs: Default::default(),
             declined: false,
+            restore_private: false,
         });
 
     let mut c = h.connect();
@@ -366,6 +367,7 @@ fn a_review_selection_limits_which_tabs_are_offered() {
             windows: ["w-old".to_string()].into_iter().collect(),
             tabs: ["w-old:t1".to_string()].into_iter().collect(),
             declined: false,
+            restore_private: false,
         });
 
     let mut c = h.connect();
@@ -391,6 +393,7 @@ fn declining_the_review_declines_the_tabs_too() {
             windows: Default::default(),
             tabs: Default::default(),
             declined: true,
+            restore_private: false,
         });
 
     let mut c = h.connect();
@@ -677,6 +680,7 @@ fn a_browser_that_connects_before_the_review_is_answered_waits_for_it() {
             windows: ["w-old".to_string()].into_iter().collect(),
             tabs: ["w-old:t2".to_string()].into_iter().collect(),
             declined: false,
+            restore_private: false,
         });
     }
     sr_agent::server::offer_to_connected(&h.shared);
@@ -730,6 +734,7 @@ fn a_browser_that_connects_after_the_review_is_offered_normally() {
             windows: ["w-old".to_string()].into_iter().collect(),
             tabs: ["w-old:t1".to_string()].into_iter().collect(),
             declined: false,
+            restore_private: false,
         });
     }
 
@@ -761,12 +766,57 @@ fn a_browser_with_nothing_stored_opens_no_run() {
     assert_eq!(runs, 0, "opened a restore run with nothing to restore");
 }
 
-/// The profile lives on the command line and nowhere else: `profile_key` is a hash,
-/// deliberately, so it cannot be turned back into a launch argument. Without this a
-/// session captured in a second profile came back in the first one, and the offer -
-/// which is keyed by profile - went unclaimed.
+/// Reopening a specific Chromium profile needs its *directory* name, and that cannot
+/// come from `profile_key`, which is a hash on purpose. It comes from the mapping the
+/// extension handshake records. Without it a session captured in a second profile came
+/// back in the first one, and the offer, keyed by profile, then went unclaimed.
 #[test]
 fn a_browser_is_started_with_the_profile_it_was_captured_in() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    let db = h.shared.db.lock().unwrap();
+    let snapshot_id: i64 = db
+        .conn
+        .query_row("SELECT MAX(id) FROM snapshots", [], |r| r.get(0))
+        .unwrap();
+
+    browser_app(&db, snapshot_id, "app-chrome", r"C:\Program Files\Chrome\chrome.exe");
+
+    // The snapshot's window is under some profile key; record what directory that key
+    // corresponds to, which is what a hello does.
+    let key: String = db
+        .conn
+        .query_row(
+            "SELECT profile_key FROM browser_windows WHERE snapshot_id = ?1 LIMIT 1",
+            [snapshot_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO browser_status (browser, profile_key, incognito_access,
+                                         profile_dir, last_seen)
+             VALUES ('chrome', ?1, 0, 'Profile 2', 0)",
+            [&key],
+        )
+        .unwrap();
+
+    let wanted: std::collections::HashSet<String> = ["w-old".to_string()].into_iter().collect();
+    let plan = sr_agent::restore::browsers_to_launch(&db, snapshot_id, &wanted).unwrap();
+
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].profile_dir.as_deref(), Some("Profile 2"));
+    assert!(
+        plan[0].args.iter().any(|a| a == "--profile-directory=Profile 2"),
+        "profile was lost: {:?}",
+        plan[0].args
+    );
+}
+
+/// Startup flags are not session state, and replaying them is actively harmful.
+/// A browser auto-started at logon carries `--no-startup-window`, which means
+/// "open no window": replaying it looks exactly like the restore failing silently.
+#[test]
+fn startup_only_flags_are_never_replayed() {
     let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
     let db = h.shared.db.lock().unwrap();
     let snapshot_id: i64 = db
@@ -779,18 +829,48 @@ fn a_browser_is_started_with_the_profile_it_was_captured_in() {
         snapshot_id,
         "app-chrome",
         r"C:\Program Files\Chrome\chrome.exe",
-        Some(r#""C:\Program Files\Chrome\chrome.exe" --profile-directory="Profile 2""#),
+        Some(r#""C:\chrome.exe" --no-startup-window --win-session-start --restore-last-session"#),
     );
 
     let wanted: std::collections::HashSet<String> = ["w-old".to_string()].into_iter().collect();
     let plan = sr_agent::restore::browsers_to_launch(&db, snapshot_id, &wanted).unwrap();
 
-    assert_eq!(plan.len(), 1);
-    let cmd = plan[0]
-        .command_line
-        .as_deref()
-        .expect("no command line, so the profile is lost");
-    assert!(cmd.contains("--profile-directory=\"Profile 2\""), "got {cmd}");
+    assert_eq!(plan.len(), 1, "the browser must still be started");
+    for bad in ["--no-startup-window", "--win-session-start", "--restore-last-session"] {
+        assert!(
+            !plan[0].args.iter().any(|a| a == bad),
+            "replayed a startup-only flag {bad}: {:?}",
+            plan[0].args
+        );
+    }
+}
+
+/// An unpacked extension only exists if the flag that loads it comes back, so this one
+/// is kept where the startup flags are not.
+#[test]
+fn the_flag_that_loads_the_extension_is_kept() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    let db = h.shared.db.lock().unwrap();
+    let snapshot_id: i64 = db
+        .conn
+        .query_row("SELECT MAX(id) FROM snapshots", [], |r| r.get(0))
+        .unwrap();
+
+    browser_app_with(
+        &db,
+        snapshot_id,
+        "app-chrome",
+        r"C:\Program Files\Chrome\chrome.exe",
+        Some(r#""C:\chrome.exe" --load-extension=C:\ext --no-startup-window"#),
+    );
+
+    let wanted: std::collections::HashSet<String> = ["w-old".to_string()].into_iter().collect();
+    let plan = sr_agent::restore::browsers_to_launch(&db, snapshot_id, &wanted).unwrap();
+    assert!(
+        plan[0].args.iter().any(|a| a.starts_with("--load-extension=")),
+        "dropped the flag that loads the extension: {:?}",
+        plan[0].args
+    );
 }
 
 /// A redacted command line must never be replayed: the sentinel is not an argument.
@@ -816,9 +896,269 @@ fn a_redacted_command_line_is_not_replayed() {
 
     assert_eq!(plan.len(), 1, "the browser must still be started");
     assert!(
-        plan[0].command_line.is_none(),
+        plan[0].args.iter().all(|a| !a.contains("<redacted:")),
         "would have passed a redaction sentinel to the browser: {:?}",
-        plan[0].command_line
+        plan[0].args
     );
     assert!(plan[0].exe_path.ends_with("chrome.exe"), "no fallback to start with");
+}
+
+/// The fallback that makes a profile mismatch survivable.
+///
+/// Chromium runs one browser process for every profile, so a session captured from a
+/// taskbar launch has no profile on its command line and one captured after the profile
+/// picker does. Requiring an exact match meant picking the right profile by hand still
+/// restored nothing, which is the worst answer to give someone who just did as asked.
+#[test]
+fn a_browser_whose_profile_does_not_match_is_still_offered_its_only_session() {
+    let h = Harness::with_previous_session(&[
+        ("w-old:t1", "https://one.test/"),
+        ("w-old:t2", "https://two.test/"),
+    ]);
+
+    let mut c = h.connect();
+    // The stored window is under profile "default"; this browser announces a different
+    // one, exactly as Chromium does after the profile picker.
+    send(
+        &mut c,
+        serde_json::json!({
+            "v": 1, "id": sr_proto::new_id(), "type": "hello", "ts": 0,
+            "src": { "browser": "chrome", "profile_key": "a1b2c3d4e5f6", "ext_version": "0.1.0" },
+            "body": { "ext_version": "0.1.0", "browser_version": "test",
+                      "incognito_access": false, "capabilities": [] }
+        }),
+    );
+    assert_eq!(recv(&mut c).kind, "hello_ack");
+
+    let offer = recv(&mut c);
+    assert_eq!(offer.kind, "restore_session", "a mismatched profile got nothing back");
+    assert_eq!(offer.body["windows"][0]["tabs"].as_array().unwrap().len(), 2);
+}
+
+/// With several stored profiles there is no safe guess, and putting one profile's tabs
+/// into another is worse than restoring nothing.
+#[test]
+fn a_mismatch_is_not_guessed_when_several_profiles_were_captured() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    {
+        let db = h.shared.db.lock().unwrap();
+        let snap: i64 = db
+            .conn
+            .query_row("SELECT MAX(id) FROM snapshots", [], |r| r.get(0))
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO browser_windows (snapshot_id, browser_window_id, browser,
+                 profile_key, is_private, window_state, focused, updated_at)
+                 VALUES (?1,'w-other','chrome','second-profile',0,'normal',0,0)",
+                [snap],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO tabs (snapshot_id, tab_key, browser_window_id, tab_index,
+                 url, title, pinned, active, muted, restorable, updated_at)
+                 VALUES (?1,'w-other:t1','w-other',0,'https://other.test/','o',0,1,0,1,0)",
+                [snap],
+            )
+            .unwrap();
+    }
+
+    let mut c = h.connect();
+    send(
+        &mut c,
+        serde_json::json!({
+            "v": 1, "id": sr_proto::new_id(), "type": "hello", "ts": 0,
+            "src": { "browser": "chrome", "profile_key": "unknown-third", "ext_version": "0.1.0" },
+            "body": { "ext_version": "0.1.0", "browser_version": "test",
+                      "incognito_access": false, "capabilities": [] }
+        }),
+    );
+    assert_eq!(recv(&mut c).kind, "hello_ack");
+
+    send(&mut c, hello("chrome"));
+    assert_eq!(
+        recv(&mut c).kind,
+        "hello_ack",
+        "guessed a profile when several were stored"
+    );
+}
+
+/// The defect this pins: the private checkbox was collected from the page, stored in
+/// the choice, asserted about in a test, and then never read. Private windows were
+/// captured, encrypted, revealed on request, and never restored.
+#[test]
+fn ticking_private_windows_actually_restores_them() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    let snapshot_id: i64 = {
+        let db = h.shared.db.lock().unwrap();
+        db.conn
+            .query_row("SELECT MAX(id) FROM snapshots", [], |r| r.get(0))
+            .unwrap()
+    };
+
+    // A private window with one encrypted tab, written the way ingest writes them.
+    {
+        let db = h.shared.db.lock().unwrap();
+        db.set_setting("capture_private_windows", "true").unwrap();
+        for snap in [0i64, snapshot_id] {
+            db.conn
+                .execute(
+                    "INSERT INTO browser_windows (snapshot_id, browser_window_id, browser,
+                     profile_key, is_private, window_state, focused, updated_at)
+                     VALUES (?1,'w-priv','chrome','default',1,'normal',0,0)",
+                    [snap],
+                )
+                .unwrap();
+        }
+
+        let ctx = sr_agent::ingest::IngestCtx {
+            db: &db,
+            keys: &h.shared.keys,
+            capture_private: true,
+            private_ttl_hours: 24,
+            snapshot_id,
+        };
+        let delta = sr_proto::TabDelta {
+            op: sr_proto::Op::Upsert,
+            tab_key: "w-priv:t1".into(),
+            window_id: "w-priv".into(),
+            group_key: None,
+            index: Some(0),
+            url: Some("https://secret.test/".into()),
+            title: Some("secret".into()),
+            favicon_hash: None,
+            pinned: false,
+            active: true,
+            muted: false,
+            last_accessed: None,
+            private: true,
+            restorable: true,
+        };
+        sr_agent::ingest::ingest_tab(&delta, &ctx).unwrap();
+    }
+
+    {
+        let mut pending = h.shared.pending_restore.lock().unwrap();
+        pending.set_selection(BrowserSelection {
+            windows: ["w-old".to_string(), "w-priv".to_string()].into_iter().collect(),
+            tabs: Default::default(),
+            declined: false,
+            restore_private: true,
+        });
+    }
+
+    let mut c = h.connect();
+    send(&mut c, hello("chrome"));
+    assert_eq!(recv(&mut c).kind, "hello_ack");
+
+    let offer = recv(&mut c);
+    assert_eq!(offer.kind, "restore_session");
+    let windows = offer.body["windows"].as_array().unwrap();
+    let private: Vec<_> = windows.iter().filter(|w| w["private"] == true).collect();
+    assert_eq!(private.len(), 1, "the private window was not offered: {windows:?}");
+    assert_eq!(private[0]["tabs"][0]["url"], "https://secret.test/");
+}
+
+/// Not ticking it leaves them alone, which is the default and the safe direction.
+#[test]
+fn not_ticking_private_windows_leaves_them_out() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    {
+        let mut pending = h.shared.pending_restore.lock().unwrap();
+        pending.set_selection(BrowserSelection {
+            windows: ["w-old".to_string()].into_iter().collect(),
+            tabs: Default::default(),
+            declined: false,
+            restore_private: false,
+        });
+    }
+
+    let mut c = h.connect();
+    send(&mut c, hello("chrome"));
+    assert_eq!(recv(&mut c).kind, "hello_ack");
+    let offer = recv(&mut c);
+    assert!(
+        offer.body["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|w| w["private"] != true),
+        "a private window was restored without being asked for"
+    );
+}
+
+/// Chromium runs one browser process for every profile, so the relay stamps the same
+/// key for all of them and their tabs collapse into one bucket. The extension is the
+/// only thing that can tell them apart, and this pins that its answer is used for the
+/// whole connection rather than just the handshake.
+#[test]
+fn the_profile_the_extension_reports_governs_its_tabs() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+
+    let mut c = h.connect();
+    send(
+        &mut c,
+        serde_json::json!({
+            "v": 1, "id": sr_proto::new_id(), "type": "hello", "ts": 0,
+            "src": { "browser": "chrome", "profile_key": "default", "ext_version": "0.1.0" },
+            "body": { "ext_version": "0.1.0", "browser_version": "test",
+                      "incognito_access": false, "profile_id": "work-uuid",
+                      "capabilities": [] }
+        }),
+    );
+    assert_eq!(recv(&mut c).kind, "hello_ack");
+    let _ = recv(&mut c); // the restore offer
+
+    // A tab sent afterwards must be attributed to the reported profile, not to the
+    // one the relay guessed from the shared browser process.
+    send(
+        &mut c,
+        serde_json::json!({
+            "v": 1, "id": sr_proto::new_id(), "type": "full_state", "ts": 0,
+            "src": { "browser": "chrome", "profile_key": "default", "ext_version": "0.1.0" },
+            "body": {
+                "windows": [{ "op": "upsert", "window_id": "w-new", "focused": true,
+                              "private": false }],
+                "tabs": [{ "op": "upsert", "tab_key": "w-new:t1", "window_id": "w-new",
+                           "index": 0, "url": "https://work.test/", "title": "work" }]
+            }
+        }),
+    );
+
+    let mut stored = None;
+    for _ in 0..40 {
+        {
+            let db = h.shared.db.lock().unwrap();
+            stored = db
+                .conn
+                .query_row(
+                    "SELECT profile_key FROM browser_windows
+                     WHERE snapshot_id = 0 AND browser_window_id = 'w-new'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok();
+        }
+        if stored.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    assert_eq!(
+        stored.as_deref(),
+        Some("ext:work-uuid"),
+        "the extension's profile did not govern its own tabs"
+    );
+}
+
+/// Firefox runs a process per profile, so the relay can already tell them apart and an
+/// extension that sends nothing must keep working exactly as before.
+#[test]
+fn an_extension_that_reports_no_profile_still_works() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    let mut c = h.connect();
+    send(&mut c, hello("firefox"));
+    assert_eq!(recv(&mut c).kind, "hello_ack");
 }

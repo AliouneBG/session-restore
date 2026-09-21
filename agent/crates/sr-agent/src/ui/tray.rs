@@ -12,6 +12,7 @@ use tray_icon::{TrayIcon, TrayIconBuilder};
 pub struct Tray {
     _icon: TrayIcon,
     pub restore_id: tray_icon::menu::MenuId,
+    pub undo_id: tray_icon::menu::MenuId,
     pub settings_id: tray_icon::menu::MenuId,
     pub capture_now_id: tray_icon::menu::MenuId,
     pub pause_id: tray_icon::menu::MenuId,
@@ -25,6 +26,7 @@ impl Tray {
         let menu = Menu::new();
 
         let restore = MenuItem::new("Restore last session…", true, None);
+        let undo = MenuItem::new("Undo last restore", true, None);
         let capture_now = MenuItem::new("Capture now", true, None);
         let settings = MenuItem::new("Settings...", true, None);
         let pause = CheckMenuItem::new("Pause capture", true, !capture_enabled, None);
@@ -32,6 +34,7 @@ impl Tray {
         let quit = MenuItem::new("Quit Session Restore", true, None);
 
         menu.append(&restore)?;
+        menu.append(&undo)?;
         menu.append(&capture_now)?;
         menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&settings)?;
@@ -48,6 +51,7 @@ impl Tray {
 
         Ok(Tray {
             restore_id: restore.id().clone(),
+            undo_id: undo.id().clone(),
             settings_id: settings.id().clone(),
             capture_now_id: capture_now.id().clone(),
             pause_id: pause.id().clone(),

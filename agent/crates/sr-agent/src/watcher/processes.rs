@@ -357,6 +357,11 @@ pub fn profile_from_command_line(cmd: &str) -> String {
     }
 }
 
+/// [`split_quoted`], for callers outside this module.
+pub fn split_quoted_public(cmd: &str) -> Vec<&str> {
+    split_quoted(cmd)
+}
+
 /// Splits a command line, keeping quoted runs together.
 fn split_quoted(cmd: &str) -> Vec<&str> {
     let mut out = Vec::new();

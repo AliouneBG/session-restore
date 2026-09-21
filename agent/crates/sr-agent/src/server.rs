@@ -82,6 +82,8 @@ pub struct BrowserSelection {
     pub tabs: std::collections::HashSet<String>,
     /// True when the user declined outright, as opposed to selecting nothing yet.
     pub declined: bool,
+    /// The user ticked the private-window box and is asking for those back too.
+    pub restore_private: bool,
 }
 
 impl PendingRestore {
@@ -266,6 +268,34 @@ fn connection_loop(
             }
         }
 
+        // The extension's own view of which profile it is in wins, for the whole
+        // connection rather than for this one message.
+        //
+        // The relay stamps a profile key derived from the browser process, and for
+        // Chromium that is not a profile at all: one browser process serves every
+        // profile, so all of them produce the same key and their tabs collapse into a
+        // single bucket. Work tabs then restore into Personal, which is worse than not
+        // restoring at all. Only code running inside the profile can tell them apart.
+        //
+        // This does relax "the extension never reports its own profile". The extension
+        // is allowlisted by id in the native messaging manifest, so it is not an
+        // arbitrary caller, and the id it sends is opaque and self-generated: the worst
+        // it can claim is an id it already has.
+        if env.kind == "hello" {
+            if let Some(id) = env
+                .body
+                .get("profile_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                let reported = format!("ext:{id}");
+                if profile.as_deref() != Some(reported.as_str()) {
+                    tracing::debug!(profile = %reported, "profile reported by the extension");
+                    *profile = Some(reported);
+                }
+            }
+        }
+
         // Registered before dispatch, so a `hello` whose offer is deferred can still be
         // reached when the review is answered a moment later.
         if !registered {
@@ -298,6 +328,61 @@ fn write_one(writer: &Arc<Mutex<sr_ipc::PipeConnection>>, env: &Envelope) -> Res
     let mut w = writer.lock().unwrap();
     write_frame(&mut *w, &serde_json::to_string(env)?, MAX_OUTBOUND_BYTES)?;
     Ok(())
+}
+
+/// The stored profile whose session should be offered to a connecting browser.
+///
+/// An exact match wins. Failing that, a browser with exactly one captured profile has
+/// only one possible answer, so it is given rather than withheld: the alternative is a
+/// user who signed in, picked the right profile, and still got nothing back.
+///
+/// With several captured profiles and no match, nothing is offered. Guessing there
+/// would put one profile's tabs into another, which is worse than restoring nothing.
+fn effective_profile(
+    db: &Db,
+    snapshot_id: i64,
+    browser: &str,
+    connecting: &str,
+) -> Option<String> {
+    let mut stmt = db
+        .conn
+        .prepare(
+            "SELECT DISTINCT profile_key FROM browser_windows
+             WHERE snapshot_id = ?1 AND browser = ?2",
+        )
+        .ok()?;
+    let profiles: Vec<String> = stmt
+        .query_map(rusqlite::params![snapshot_id, browser], |r| r.get(0))
+        .ok()?
+        .filter_map(Result::ok)
+        .collect();
+    drop(stmt);
+
+    if profiles.iter().any(|p| p == connecting) {
+        return Some(connecting.to_string());
+    }
+    match profiles.len() {
+        0 => None,
+        1 => {
+            let only = profiles.into_iter().next()?;
+            tracing::info!(
+                browser,
+                connecting,
+                stored = %only,
+                "profile did not match; this browser has only one stored session, offering it"
+            );
+            Some(only)
+        }
+        n => {
+            tracing::info!(
+                browser,
+                connecting,
+                stored_profiles = n,
+                "profile did not match and several are stored; not guessing"
+            );
+            None
+        }
+    }
 }
 
 /// The browsers whose extensions are connected to this agent right now.
@@ -418,6 +503,7 @@ fn dispatch(env: &Envelope, shared: &Shared, profile_override: Option<&str>) -> 
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
+
             tracing::info!(
                 browser,
                 incognito_access,
@@ -425,22 +511,36 @@ fn dispatch(env: &Envelope, shared: &Shared, profile_override: Option<&str>) -> 
                 "extension connected"
             );
 
+            // The profile *directory*, which is the only thing that can reopen a
+            // specific profile later. profile_key cannot: it is a hash, deliberately.
+            // Resolved from the browser's command line when a launch named one, and
+            // otherwise from Chromium's own record of the last profile used.
+            let profile_dir = env
+                .src
+                .as_ref()
+                .and_then(|s| s.browser_pid)
+                .and_then(|pid| crate::watcher::processes::read_command_line(pid).ok())
+                .and_then(|cmd| crate::watcher::profiles::resolve_profile_dir(browser, Some(&cmd)))
+                .or_else(|| crate::watcher::profiles::last_used_profile_dir(browser));
+
             // Recorded so the settings and onboarding windows can show the real state
             // of each browser. Whether the browser granted private-window access is
             // knowable only here: the extension is the only thing that can see it.
             let _ = db.conn.execute(
                 "INSERT INTO browser_status (browser, profile_key, ext_version,
-                                             incognito_access, last_seen)
-                 VALUES (?1,?2,?3,?4,?5)
+                                             incognito_access, profile_dir, last_seen)
+                 VALUES (?1,?2,?3,?4,?5,?6)
                  ON CONFLICT(browser, profile_key) DO UPDATE SET
                    ext_version = excluded.ext_version,
                    incognito_access = excluded.incognito_access,
+                   profile_dir = COALESCE(excluded.profile_dir, browser_status.profile_dir),
                    last_seen = excluded.last_seen",
                 rusqlite::params![
                     browser,
                     profile,
                     env.src.as_ref().map(|s| s.ext_version.clone()),
                     incognito_access,
+                    profile_dir,
                     sr_proto::now_millis(),
                 ],
             );
@@ -722,6 +822,24 @@ fn maybe_offer_restore(shared: &Shared, browser: &str, profile: &str) -> Result<
         return Ok(None);
     }
 
+    // Which stored profile these tabs belong to.
+    //
+    // The connecting profile key often will not match what was captured, and the
+    // reason is structural rather than a bug to hunt: Chromium runs one browser
+    // process for every profile, so a session captured from a taskbar launch has no
+    // profile on its command line and a session captured after the profile picker
+    // does. Requiring an exact match meant that picking the right profile by hand
+    // still restored nothing, which is the worst possible answer to give someone who
+    // just did what they were asked.
+    let profile = match effective_profile(&db, snapshot_id, browser, profile) {
+        Some(p) => p,
+        None => {
+            tracing::debug!(browser, "nothing stored for any profile of this browser");
+            return Ok(None);
+        }
+    };
+    let profile = profile.as_str();
+
     // Built before the run is opened, and with a placeholder id, because there may be
     // nothing to offer. Opening the run first left a `restore_runs` row and an undo
     // snapshot behind for every browser that had no stored windows - Firefox with one
@@ -744,6 +862,23 @@ fn maybe_offer_restore(shared: &Shared, browser: &str, profile: &str) -> Result<
     if body.windows.is_empty() {
         tracing::debug!(browser, "nothing stored for this browser; no offer");
         return Ok(None);
+    }
+
+    // Private windows, only when the user ticked the box in the review window. They
+    // are never part of an automatic offer, and the decryption happens here, as late
+    // as possible (ADR-0004).
+    if selection.as_ref().map(|s| s.restore_private).unwrap_or(false) {
+        match crate::restore::build_private_payload(&db, &shared.keys, snapshot_id, browser, profile, 0) {
+            Ok(private) => {
+                let n = private.windows.len();
+                body.windows.extend(private.windows);
+                if n > 0 {
+                    tracing::info!(browser, windows = n, "including private windows");
+                }
+            }
+            // A private restore that cannot be built must never stop the ordinary one.
+            Err(e) => tracing::warn!(browser, error = %e, "could not build the private payload"),
+        }
     }
 
     let run_id = crate::restore::begin_run(&db, snapshot_id, &mode)?;

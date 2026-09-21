@@ -154,6 +154,36 @@ async function hydrateOutbox(): Promise<void> {
   }
 }
 
+const PROFILE_ID_KEY = "sr_profile_id";
+
+/**
+ * A stable id for the profile this extension instance is running in.
+ *
+ * Chromium runs ONE browser process for every profile, so the agent cannot tell two
+ * profiles apart from the process that spawned the relay: both report the same command
+ * line, and their tabs collapse into a single bucket. Work tabs get restored into
+ * Personal, and a session restored into the wrong profile is worse than none.
+ *
+ * `storage.local` is per-profile by definition, so an id kept there identifies the
+ * profile without the extension ever being able to see the profile path. The value is
+ * random and says nothing about the user.
+ */
+async function profileId(): Promise<string | undefined> {
+  try {
+    const stored = await chrome.storage.local.get(PROFILE_ID_KEY);
+    const existing = stored?.[PROFILE_ID_KEY];
+    if (typeof existing === "string" && existing.length > 0) return existing;
+
+    const fresh = crypto.randomUUID();
+    await chrome.storage.local.set({ [PROFILE_ID_KEY]: fresh });
+    return fresh;
+  } catch {
+    // storage.local can be unavailable in odd states. The agent falls back to the
+    // relay's view, which is what it did before this existed.
+    return undefined;
+  }
+}
+
 async function sayHello(): Promise<void> {
   const caps = detectCaps();
   let incognitoAccess = false;
@@ -167,6 +197,7 @@ async function sayHello(): Promise<void> {
     ext_version: chrome.runtime.getManifest().version,
     browser_version: navigator.userAgent,
     incognito_access: incognitoAccess,
+    profile_id: await profileId(),
     capabilities: caps.capabilities,
   });
 }

@@ -74,13 +74,43 @@ pub fn candidates_from_title(title: &str) -> Vec<String> {
     out
 }
 
+/// How long a built index is reused before it is rebuilt.
+///
+/// Building it reads several hundred shortcuts through COM, which is the single most
+/// expensive thing a capture does. Documents do not appear and disappear on a
+/// sub-minute timescale, and the 60s reconcile is already the floor on staleness for
+/// everything else, so matching it here costs nothing in correctness.
+const INDEX_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+static INDEX_CACHE: std::sync::Mutex<Option<(std::time::Instant, HashMap<String, PathBuf>)>> =
+    std::sync::Mutex::new(None);
+
 /// Maps file name -> full path from the user's Recent items.
 ///
-/// Recent is where Windows records what was actually opened, by any means - command
+/// Recent is where Windows records what was actually opened, by any means: command
 /// line, File > Open, drag and drop, or a jump list. That makes it the one source that
 /// covers the cases a command line misses.
-#[cfg(windows)]
+///
+/// Cached for [`INDEX_TTL`]. Window events arrive in bursts, and before the cache
+/// existed every event in a burst paid for several hundred COM calls of its own.
 pub fn recent_index() -> HashMap<String, PathBuf> {
+    if let Ok(cache) = INDEX_CACHE.lock() {
+        if let Some((built, index)) = cache.as_ref() {
+            if built.elapsed() < INDEX_TTL {
+                return index.clone();
+            }
+        }
+    }
+
+    let fresh = build_recent_index();
+    if let Ok(mut cache) = INDEX_CACHE.lock() {
+        *cache = Some((std::time::Instant::now(), fresh.clone()));
+    }
+    fresh
+}
+
+#[cfg(windows)]
+fn build_recent_index() -> HashMap<String, PathBuf> {
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 
     let mut index = HashMap::new();
@@ -175,7 +205,7 @@ fn resolve_shortcut(link: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(not(windows))]
-pub fn recent_index() -> HashMap<String, PathBuf> {
+fn build_recent_index() -> HashMap<String, PathBuf> {
     HashMap::new()
 }
 

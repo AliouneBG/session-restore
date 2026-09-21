@@ -8,6 +8,7 @@ pub mod documents;
 pub mod events;
 pub mod identity;
 pub mod processes;
+pub mod profiles;
 pub mod windows;
 
 use crate::store::db::{Db, LIVE};

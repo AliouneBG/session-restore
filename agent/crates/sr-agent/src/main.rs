@@ -226,43 +226,10 @@ fn cmd_undo() -> Result<()> {
     let dir = data_dir()?;
     let db = Db::open(&dir.join("sessions.db"))?;
 
-    let run: Option<(i64, i64, Option<i64>)> = db
-        .conn
-        .query_row(
-            "SELECT id, snapshot_id, undo_snapshot_id FROM restore_runs
-             ORDER BY started_at DESC LIMIT 1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .ok();
-
-    let Some((run_id, _snapshot_id, undo)) = run else {
-        println!("No restore to undo.");
-        return Ok(());
-    };
-    let Some(undo_snapshot) = undo else {
-        println!("Restore #{run_id} has no undo point (nothing was open when it ran).");
-        return Ok(());
-    };
-
-    let apps = sr_agent::restore::apps::plan_from_snapshot(&db, undo_snapshot)?;
-    println!(
-        "Undoing restore #{run_id}: returning to the {} application(s) open beforehand.",
-        apps.len()
-    );
-
-    // Deliberately only re-places windows; it does not close what the restore opened.
-    //
-    // Closing applications to undo would risk destroying work the user has done since,
-    // which is a far worse outcome than a few extra windows being open.
-    let displays = sr_agent::watcher::displays::enumerate()?;
-    let report = sr_agent::restore::apps::restore_apps(&apps, &displays, false);
-    println!(
-        "Restored {} application(s), placed {} window(s).",
-        report.launched.len(),
-        report.placed
-    );
-    println!("Windows opened by the restore were left alone rather than closed.");
+    // One implementation, shared with the tray. Undo used to exist only here, which
+    // meant the feature was unreachable for anyone who had not read --help.
+    let outcome = sr_agent::restore::undo::undo_last(&db)?;
+    println!("{}", outcome.message());
     Ok(())
 }
 
@@ -291,6 +258,21 @@ fn cmd_status() -> Result<()> {
             "no - run: sr-agent --install"
         }
     );
+    // Which profile each browser would be reopened into. Surfaced because a silent
+    // "unknown" here is the difference between restoring into the right profile and
+    // landing on the profile picker.
+    for b in ["chrome", "edge"] {
+        let dir = sr_agent::watcher::profiles::last_used_profile_dir(b);
+        let known = sr_agent::watcher::profiles::known_profile_dirs(b);
+        if !known.is_empty() {
+            println!(
+                "{:<16} {} profile(s), last used: {}",
+                format!("{b} profiles:"),
+                known.len(),
+                dir.as_deref().unwrap_or("unknown")
+            );
+        }
+    }
     println!(
         "Start Menu:      {}",
         if sr_agent::setup::shortcut::is_installed() {

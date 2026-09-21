@@ -17,6 +17,7 @@ use crate::store::db::Db;
 use crate::store::keys::KeyManager;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub struct UiContext {
     pub db: Arc<Mutex<Db>>,
@@ -87,7 +88,37 @@ pub fn run_app(ctx: UiContext) -> Result<()> {
         Ok(rx) => {
             let db = Arc::clone(&ctx.db);
             std::thread::spawn(move || {
+                // Coalesced, not one capture per event.
+                //
+                // A capture walks every process on the machine and takes a few hundred
+                // milliseconds while holding the database lock. Window events arrive in
+                // bursts: opening one application can produce a dozen, and a restore
+                // that launches five produces a storm. One capture per event meant the
+                // restore competed with a queue of captures for the same lock, and
+                // anything else that wanted the database waited behind all of them.
+                // That is what "Session Restore is not responding" was.
+                //
+                // Instead: wait for an event, let the burst finish, then capture once.
+                // This is the same debounce the browser side already applies to tab
+                // events (T0 in docs/01-architecture.md).
+                const SETTLE: Duration = Duration::from_millis(400);
+                const MIN_INTERVAL: Duration = Duration::from_secs(2);
+                let mut last = std::time::Instant::now() - MIN_INTERVAL;
+
                 while rx.recv().is_ok() {
+                    // Let the rest of the burst land, then swallow it.
+                    std::thread::sleep(SETTLE);
+                    while rx.try_recv().is_ok() {}
+
+                    // A floor on how often this can run at all, so a pathological
+                    // source of events cannot turn into a busy loop.
+                    let since = last.elapsed();
+                    if since < MIN_INTERVAL {
+                        std::thread::sleep(MIN_INTERVAL - since);
+                        while rx.try_recv().is_ok() {}
+                    }
+                    last = std::time::Instant::now();
+
                     let db = db.lock().unwrap();
                     if !db.setting_bool("capture_enabled", true) {
                         continue;
@@ -177,6 +208,26 @@ pub fn run_app(ctx: UiContext) -> Result<()> {
                         },
                         None => tracing::info!("nothing to restore"),
                     }
+                } else if id == tray.undo_id {
+                    // Off the message pump: undo re-places windows and can relaunch
+                    // applications, which is the same work a restore does.
+                    let db = Arc::clone(&db);
+                    std::thread::spawn(move || {
+                        let outcome = {
+                            let db = db.lock().unwrap();
+                            crate::restore::undo::undo_last(&db)
+                        };
+                        match outcome {
+                            Ok(o) => {
+                                tracing::info!(outcome = ?o, "undo finished");
+                                notify("Undo", &o.message());
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "undo failed");
+                                notify("Undo", &format!("Could not undo: {e:#}"));
+                            }
+                        }
+                    });
                 } else if id == tray.settings_id {
                     if settings_window.is_some() {
                         return;
@@ -193,11 +244,16 @@ pub fn run_app(ctx: UiContext) -> Result<()> {
                         Err(e) => tracing::error!(error = %e, "could not open settings"),
                     }
                 } else if id == tray.capture_now_id {
-                    let db = db.lock().unwrap();
-                    match crate::watcher::capture_into_live(&db) {
-                        Ok(s) => tracing::info!(apps = s.apps, windows = s.windows, "captured"),
-                        Err(e) => tracing::warn!(error = %e, "capture failed"),
-                    }
+                    // Off the message pump. A capture walks every process on the
+                    // machine, and doing that here froze the tray for the duration.
+                    let db = Arc::clone(&db);
+                    std::thread::spawn(move || {
+                        let db = db.lock().unwrap();
+                        match crate::watcher::capture_into_live(&db) {
+                            Ok(s) => tracing::info!(apps = s.apps, windows = s.windows, "captured"),
+                            Err(e) => tracing::warn!(error = %e, "capture failed"),
+                        }
+                    });
                 } else if id == tray.pause_id {
                     let db = db.lock().unwrap();
                     let now_enabled = db.setting_bool("capture_enabled", true);
@@ -490,6 +546,27 @@ fn open_window(
     Ok((window, webview))
 }
 
+/// Tells the user the outcome of something they asked for from the tray.
+///
+/// A message box rather than a toast: toasts need a registered AppUserModelID and a
+/// shortcut in the Start Menu to be delivered reliably, and an undo that silently did
+/// nothing visible is exactly the case that needs a definite answer.
+#[cfg(windows)]
+fn notify(title: &str, message: &str) {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND,
+    };
+    unsafe {
+        MessageBoxW(
+            None,
+            &HSTRING::from(message),
+            &HSTRING::from(format!("Session Restore - {title}")),
+            MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
+        );
+    }
+}
+
 /// Matches the window caption to the system's app theme.
 ///
 /// Best effort on purpose: `DWMWA_USE_IMMERSIVE_DARK_MODE` is unsupported before
@@ -563,6 +640,11 @@ fn apply_choice(
             windows: choice.browser_windows.iter().cloned().collect(),
             tabs: choice.tabs.iter().cloned().collect(),
             declined: !choice.confirmed,
+            // The one place this is read. Before it was carried here, the checkbox in
+            // the review window was collected, stored, and never acted on: private
+            // windows were captured, encrypted, revealed on request, and never
+            // actually restored.
+            restore_private: choice.restore_private,
         });
     }
 
@@ -582,101 +664,80 @@ fn apply_choice(
     // the two refusals above, so neither can send an offer on its way out.
     crate::server::offer_to_connected(shared);
 
-    let selected: std::collections::HashSet<&str> =
-        choice.apps.iter().map(|s| s.as_str()).collect();
-
-    let (apps, displays, run_id, browsers) = {
-        let db = db.lock().unwrap();
-        let all = match crate::restore::apps::plan_from_snapshot(&db, snapshot_id) {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::error!(error = %e, "could not plan the restore");
-                return;
-            }
-        };
-        let picked: Vec<_> = all
-            .into_iter()
-            .filter(|a| selected.contains(a.app_key.as_str()))
-            .collect();
-        if picked.is_empty() {
-            tracing::info!("no applications selected");
-            return;
-        }
-
-        // The undo point, and it has to be taken here rather than left to the browser
-        // half. This path used to launch applications without opening a run at all, so
-        // a restore answered in the review window was the one restore `--undo` could
-        // not reverse: with no run of its own it reached back to whatever ran last,
-        // and "undo" meant restoring some older session over the top of this one.
-        //
-        // Capture first: the undo point is what is on screen *now*, and the periodic
-        // sweep may be up to a minute stale, which at startup is exactly the minute
-        // in which the review window is answered.
-        if let Err(e) = crate::watcher::capture_into_live(&db) {
-            tracing::warn!(error = %e, "capture before restore failed; undo point may be stale");
-        }
-        // "ask" and not a mode of its own: `restore_runs.mode` records how the
-        // restore was decided, and the review window is what asking looks like.
-        // It also keeps one episode's rows consistent - the browser half passes
-        // the same setting value when it connects a moment later.
-        let run_id = match crate::restore::begin_run(&db, snapshot_id, "ask") {
-            Ok(id) => id,
-            Err(e) => {
-                // Without a run there is no undo, and silently restoring anyway would
-                // hand the user an irreversible change they had no way to know about.
-                tracing::error!(error = %e, "could not open a restore run; not restoring");
-                return;
-            }
-        };
-
-        // A browser that is not running will never connect, and the offer recorded
-        // above waits for a connection. After a reboot that is every browser.
-        let wanted: std::collections::HashSet<String> =
-            choice.browser_windows.iter().cloned().collect();
-        let browsers = crate::restore::browsers_to_launch(&db, snapshot_id, &wanted)
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "could not work out which browsers to start");
-                Vec::new()
-            });
-
-        let displays = crate::watcher::displays::enumerate().unwrap_or_default();
-        (picked, displays, run_id, browsers)
-    };
-
-    // Launching blocks on staggered sleeps, so it runs off the UI thread; holding the
-    // message pump would freeze the tray for the duration.
+    // Everything below runs off the message pump.
+    //
+    // It captures the desktop, writes a snapshot, plans the restore and launches
+    // applications, and the capture alone walks every process on the machine while
+    // holding the database lock. Doing that here froze the window at the exact moment
+    // the user pressed Restore, which is where "Session Restore is not responding"
+    // came from. The selection above is recorded synchronously because a browser can
+    // connect at any moment and must not race it; the slow part does not need to be.
     let db = Arc::clone(db);
-    std::thread::spawn(move || {
-        for b in &browsers {
-            // The command line first, because it carries the profile. Falling back to
-            // the bare executable matters: a stored command line can name a profile
-            // directory that no longer exists, and a browser open on the wrong profile
-            // is a far better outcome than one that did not start at all.
-            let via_command_line = b
-                .command_line
-                .as_deref()
-                .map(|cmd| crate::restore::launch::launch_with_command_line(cmd, None));
+    let shared = Arc::clone(shared);
+    let apps_wanted: std::collections::HashSet<String> = choice.apps.iter().cloned().collect();
+    let windows_wanted: std::collections::HashSet<String> =
+        choice.browser_windows.iter().cloned().collect();
 
-            let result = match via_command_line {
-                Some(Ok(l)) => Ok(l),
-                Some(Err(e)) => {
-                    tracing::warn!(
-                        browser = %b.browser, error = %e,
-                        "stored command line would not start; falling back to the executable"
-                    );
-                    crate::restore::launch::launch_via_shell(&b.exe_path)
+    std::thread::spawn(move || {
+        let _ = &shared;
+        let (apps, displays, run_id, browsers) = {
+            let db = db.lock().unwrap();
+
+            let all = match crate::restore::apps::plan_from_snapshot(&db, snapshot_id) {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::error!(error = %e, "could not plan the restore");
+                    return;
                 }
-                None => crate::restore::launch::launch_via_shell(&b.exe_path),
+            };
+            let picked: Vec<_> = all
+                .into_iter()
+                .filter(|a| apps_wanted.contains(a.app_key.as_str()))
+                .collect();
+
+            // The undo point is what is on screen *now*, and the periodic sweep can be
+            // a minute stale, which at startup is exactly the minute in which the
+            // review window is answered.
+            if let Err(e) = crate::watcher::capture_into_live(&db) {
+                tracing::warn!(error = %e, "capture before restore failed; undo point may be stale");
+            }
+            let run_id = match crate::restore::begin_run(&db, snapshot_id, "ask") {
+                Ok(id) => id,
+                Err(e) => {
+                    // Without a run there is no undo, and restoring anyway would hand
+                    // the user an irreversible change they had no way to know about.
+                    tracing::error!(error = %e, "could not open a restore run; not restoring");
+                    return;
+                }
             };
 
-            match result {
+            // A browser that is not running will never connect, and the offer recorded
+            // above waits for a connection. After a reboot that is every browser.
+            let browsers = crate::restore::browsers_to_launch(&db, snapshot_id, &windows_wanted)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "could not work out which browsers to start");
+                    Vec::new()
+                });
+
+            let displays = crate::watcher::displays::enumerate().unwrap_or_default();
+            (picked, displays, run_id, browsers)
+        };
+
+        for b in &browsers {
+            match crate::restore::launch::launch_with_args(&b.exe_path, &b.args) {
                 Ok(_) => tracing::info!(
                     browser = %b.browser,
-                    with_profile = b.command_line.is_some(),
+                    profile = b.profile_dir.as_deref().unwrap_or("unspecified"),
+                    args = b.args.len(),
                     "started for restore"
                 ),
                 Err(e) => tracing::warn!(browser = %b.browser, error = %e, "could not start"),
             }
+        }
+
+        if apps.is_empty() {
+            tracing::info!("no applications selected");
+            return;
         }
 
         let report = crate::restore::apps::restore_apps(&apps, &displays, false);

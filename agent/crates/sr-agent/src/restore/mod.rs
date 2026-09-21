@@ -11,6 +11,7 @@
 pub mod apps;
 pub mod launch;
 pub mod place;
+pub mod undo;
 
 use crate::store::crypto::{aad, open as unseal};
 use crate::store::db::Db;
@@ -224,24 +225,47 @@ pub struct BrowserLaunch {
     /// The id the extension reports in `hello`, e.g. `edge`.
     pub browser: String,
     pub exe_path: String,
-    /// The command line it was captured with, when one is usable.
+    /// Arguments to start it with. Never the raw captured command line.
     ///
-    /// This is what restores the *profile*. A browser started from its bare executable
-    /// opens whichever profile it opens by default, so a session captured in a second
-    /// profile came back in the first one - and the offer, which is keyed by profile,
-    /// then went unclaimed. The profile argument lives on the command line, and
-    /// `profile_key` cannot stand in for it: it is a hash, deliberately, because a
-    /// profile path can contain the user's name.
-    pub command_line: Option<String>,
+    /// Replaying what a browser was running with is wrong, and this was found the hard
+    /// way: browsers auto-started at logon carry flags like `--no-startup-window`,
+    /// `--win-session-start` and `-os-autostart`. Replaying the first of those launches
+    /// a browser that deliberately shows no window, which looks exactly like the
+    /// restore silently failing.
+    ///
+    /// Only arguments that are known to be safe and useful are rebuilt, from scratch.
+    pub args: Vec<String>,
+    /// The profile directory this session belongs to, when it is known.
+    pub profile_dir: Option<String>,
 }
 
-/// True when a redacted command line must not be replayed.
+/// Arguments worth carrying from a captured command line into a fresh launch.
 ///
-/// A redacted argument is stored as a length-preserving sentinel so restore can tell
-/// "no arguments" from "arguments we refused to keep". Passing the sentinel to the
-/// browser would be passing it a literal `<redacted:24>`.
-fn is_replayable(command_line: &str) -> bool {
-    !command_line.contains("<redacted:")
+/// An allowlist, not a denylist. A browser command line accumulates flags from the
+/// shell, from Windows startup, from experiments and from whatever launched it last
+/// time, and almost none of it describes the session. Guessing which flags are harmful
+/// gets it wrong in exactly the case that matters.
+fn useful_args(command_line: &str) -> Vec<String> {
+    // A redacted argument is stored as a length-preserving sentinel so restore can
+    // tell "no arguments" from "arguments we refused to keep". Passing the sentinel
+    // to the browser would be passing it a literal `<redacted:24>`.
+    if command_line.contains("<redacted:") {
+        return Vec::new();
+    }
+
+    const KEEP_PREFIXES: &[&str] = &[
+        // Loads an unpacked extension. Without it a development build of the
+        // extension is simply not there, and nothing restores.
+        "--load-extension=",
+        "--disable-features=",
+    ];
+
+    crate::watcher::processes::split_quoted_public(command_line)
+        .into_iter()
+        .skip(1) // the executable itself
+        .map(|a| a.trim_matches('"').to_string())
+        .filter(|a| KEEP_PREFIXES.iter().any(|p| a.starts_with(p)))
+        .collect()
 }
 
 /// The browser id the extension will report for an executable we captured.
@@ -334,13 +358,99 @@ pub fn browsers_to_launch(
         if !seen.insert(browser.to_string()) {
             continue;
         }
+
+        // Which profile this session belongs to, and how to reopen it. The directory
+        // is looked up rather than derived, because `profile_key` is a hash and cannot
+        // be turned back into a launch argument.
+        let profile_dir = profile_dir_for(db, snapshot_id, browser, wanted_windows);
+
+        let mut args = command_line.as_deref().map(useful_args).unwrap_or_default();
+        args.extend(crate::watcher::profiles::launch_args_for(
+            browser,
+            profile_dir.as_deref(),
+        ));
+
         out.push(BrowserLaunch {
             browser: browser.to_string(),
             exe_path,
-            command_line: command_line.filter(|c| is_replayable(c)),
+            args,
+            profile_dir,
         });
     }
     Ok(out)
+}
+
+/// The profile directory for the windows being restored, when one is known.
+///
+/// Reads the mapping the extension's handshake recorded. Returns `None` when the
+/// session predates that mapping or spans several profiles, in which case the launch
+/// leaves the choice to the browser rather than guessing wrong.
+fn profile_dir_for(
+    db: &Db,
+    snapshot_id: i64,
+    browser: &str,
+    wanted_windows: &std::collections::HashSet<String>,
+) -> Option<String> {
+    let mut stmt = db
+        .conn
+        .prepare(
+            "SELECT DISTINCT w.profile_key, s.profile_dir
+             FROM browser_windows w
+             LEFT JOIN browser_status s
+               ON s.browser = w.browser AND s.profile_key = w.profile_key
+             WHERE w.snapshot_id = ?1 AND w.browser = ?2",
+        )
+        .ok()?;
+    let rows: Vec<(String, Option<String>)> = stmt
+        .query_map(rusqlite::params![snapshot_id, browser], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .ok()?
+        .filter_map(Result::ok)
+        .collect();
+    drop(stmt);
+
+    // Restrict to profiles the user actually asked for, when we can tell.
+    let selected: Vec<&(String, Option<String>)> = rows
+        .iter()
+        .filter(|(key, _)| {
+            wanted_windows.is_empty() || window_in_profile(db, snapshot_id, browser, key, wanted_windows)
+        })
+        .collect();
+
+    let candidates = if selected.is_empty() { rows.iter().collect() } else { selected };
+
+    // One profile means one answer. Several means the launch cannot pick for them
+    // without being wrong half the time, so it does not try.
+    let dirs: Vec<String> = candidates
+        .iter()
+        .filter_map(|(_, dir)| dir.clone())
+        .collect();
+    if dirs.len() == 1 {
+        return dirs.into_iter().next();
+    }
+    None
+}
+
+fn window_in_profile(
+    db: &Db,
+    snapshot_id: i64,
+    browser: &str,
+    profile_key: &str,
+    wanted: &std::collections::HashSet<String>,
+) -> bool {
+    let mut stmt = match db.conn.prepare(
+        "SELECT browser_window_id FROM browser_windows
+         WHERE snapshot_id = ?1 AND browser = ?2 AND profile_key = ?3",
+    ) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    stmt.query_map(rusqlite::params![snapshot_id, browser, profile_key], |r| {
+        r.get::<_, String>(0)
+    })
+    .map(|rows| rows.filter_map(Result::ok).any(|id| wanted.contains(&id)))
+    .unwrap_or(false)
 }
 
 /// How long after a restore begins that further runs count as the same episode.

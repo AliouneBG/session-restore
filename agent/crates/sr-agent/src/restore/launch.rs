@@ -74,6 +74,35 @@ pub fn launch_with_command_line(command_line: &str, working_dir: Option<&str>) -
 /// For tier C the path is a *document*, and the shell picks the handler, which is
 /// exactly what "reopen the thing they were working on" means.
 #[cfg(windows)]
+/// Starts a program with an explicit argument list.
+///
+/// Arguments are passed as a list, never pasted into a command line string, so a path
+/// with a space in it cannot turn into two arguments and a user name with a quote in it
+/// cannot turn into anything at all.
+#[cfg(windows)]
+pub fn launch_with_args(exe: &str, args: &[String]) -> Result<Launched> {
+    use std::os::windows::process::CommandExt;
+    // CREATE_NEW_PROCESS_GROUP, so the browser does not die with us.
+    const FLAGS: u32 = 0x0000_0200;
+
+    let expanded = expand_env(exe);
+    let child = std::process::Command::new(&expanded)
+        .args(args)
+        .creation_flags(FLAGS)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("starting {expanded}"))?;
+
+    Ok(Launched { pid: Some(child.id()) })
+}
+
+#[cfg(not(windows))]
+pub fn launch_with_args(_exe: &str, _args: &[String]) -> Result<Launched> {
+    anyhow::bail!("not supported on this platform")
+}
+
 pub fn launch_via_shell(path: &str) -> Result<Launched> {
     use windows::core::HSTRING;
     use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
