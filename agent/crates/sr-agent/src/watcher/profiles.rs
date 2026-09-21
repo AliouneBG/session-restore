@@ -126,6 +126,137 @@ pub fn known_profile_dirs(browser: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The profile directory an extension instance actually lives in.
+///
+/// This is the deterministic answer, and it replaces a guess.
+///
+/// Chromium stores an extension's `storage.local` inside the profile directory, at
+/// `<User Data>\<Profile>\Local Extension Settings\<extension id>\`. The extension
+/// writes its own profile id there, so the directory containing that id *is* the
+/// profile the extension is running in. Nothing is inferred: the browser filed it there
+/// itself.
+///
+/// The alternative, reading `Local State`'s `last_used`, answers "which profile did the
+/// user look at most recently", which is only the same thing by coincidence. With two
+/// profiles open at once it is wrong half the time, and being wrong here means
+/// restoring one profile's tabs into another.
+///
+/// Returns `None` when the id is not on disk yet. `storage.local` is written
+/// asynchronously, so the very first handshake after an extension generates its id can
+/// race the write. The caller keeps the previous answer and tries again on the next
+/// handshake.
+pub fn directory_for_profile_id(
+    browser: &str,
+    extension_ids: &[String],
+    profile_id: &str,
+) -> Option<String> {
+    // A UUID is specific enough that a substring match cannot collide, and reading the
+    // LevelDB properly would mean vendoring a LevelDB reader to answer one question.
+    if profile_id.len() < 8 {
+        return None;
+    }
+    let base = user_data_dir(browser)?;
+    scan_for_profile_id(&base, &known_profile_dirs(browser), extension_ids, profile_id)
+}
+
+/// The search itself, against an explicit user-data root so it can be tested.
+fn scan_for_profile_id(
+    base: &Path,
+    profile_dirs: &[String],
+    extension_ids: &[String],
+    profile_id: &str,
+) -> Option<String> {
+    let needle = profile_id.as_bytes();
+    for dir in profile_dirs {
+        for ext in extension_ids {
+            let store = base.join(dir).join("Local Extension Settings").join(ext);
+            if !store.is_dir() {
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(&store) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if contains_bytes(&entry.path(), needle) {
+                    return Some(dir.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Whether a file contains a byte sequence.
+///
+/// Opened with sharing, because Chromium holds these files open for writing the whole
+/// time it is running and an exclusive open simply fails.
+fn contains_bytes(path: &Path, needle: &[u8]) -> bool {
+    /// Skip anything implausibly large. Extension storage for this extension is a few
+    /// kilobytes; a huge file here means something unexpected and is not worth reading
+    /// into memory during a handshake.
+    const MAX: u64 = 8 * 1024 * 1024;
+
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() > MAX {
+        return false;
+    }
+
+    let Ok(bytes) = read_shared(path) else {
+        return false;
+    };
+    bytes.windows(needle.len()).any(|w| w == needle)
+}
+
+#[cfg(windows)]
+fn read_shared(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::windows::fs::OpenOptionsExt;
+    // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+    const SHARE_ALL: u32 = 0x0000_0001 | 0x0000_0002 | 0x0000_0004;
+
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(SHARE_ALL)
+        .open(path)?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+#[cfg(not(windows))]
+fn read_shared(path: &Path) -> std::io::Result<Vec<u8>> {
+    std::fs::read(path)
+}
+
+/// The Chromium extension ids the agent has registered, read back from the manifest.
+///
+/// Read from disk rather than kept in memory because the manifest is the thing that is
+/// actually true: it is what the browser consults, and it survives a restart.
+pub fn registered_extension_ids(data_dir: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(data_dir.join("relay-manifest.chrome.json")) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    value
+        .get("allowed_origins")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .filter_map(|o| {
+                    o.strip_prefix("chrome-extension://")
+                        .map(|rest| rest.trim_end_matches('/').to_string())
+                })
+                .filter(|id| !id.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The best guess at which profile directory a connected browser is showing.
 ///
 /// The command line wins when it has one, because it is a fact rather than a guess.
@@ -167,6 +298,70 @@ pub fn profile_path(browser: &str, profile_dir: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The mapping is deterministic because the browser filed the data itself.
+    /// Proven against a real profile tree rather than a mocked one.
+    #[test]
+    fn a_profile_id_is_found_in_the_directory_that_holds_it() {
+        let root = std::env::temp_dir().join(format!("sr-prof-{}", sr_proto::new_id()));
+        let ext = "abcdefghijklmnopabcdefghijklmnop";
+
+        for dir in ["Default", "Profile 1"] {
+            let store = root.join(dir).join("Local Extension Settings").join(ext);
+            std::fs::create_dir_all(&store).unwrap();
+        }
+        // Only one profile holds this id, the way Chromium would have written it.
+        std::fs::write(
+            root.join("Profile 1")
+                .join("Local Extension Settings")
+                .join(ext)
+                .join("000003.log"),
+            b" garbage sr_profile_id the-real-id-9f2c more",
+        )
+        .unwrap();
+
+        let found = scan_for_profile_id(
+            &root,
+            &["Default".into(), "Profile 1".into()],
+            &[ext.to_string()],
+            "the-real-id-9f2c",
+        );
+        assert_eq!(found.as_deref(), Some("Profile 1"));
+
+        let missing = scan_for_profile_id(
+            &root,
+            &["Default".into(), "Profile 1".into()],
+            &[ext.to_string()],
+            "an-id-nobody-has",
+        );
+        assert_eq!(missing, None, "matched a profile that does not hold the id");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A short id could collide by accident, and a wrong answer here restores one
+    /// profile's tabs into another.
+    #[test]
+    fn an_implausibly_short_id_is_refused() {
+        assert_eq!(directory_for_profile_id("chrome", &["x".into()], "abc"), None);
+    }
+
+    #[test]
+    fn extension_ids_are_read_back_out_of_the_manifest() {
+        let dir = std::env::temp_dir().join(format!("sr-manifest-{}", sr_proto::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("relay-manifest.chrome.json"),
+            r#"{"allowed_origins":["chrome-extension://aaaabbbbccccddddeeeeffffgggghhhh/"]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            registered_extension_ids(&dir),
+            vec!["aaaabbbbccccddddeeeeffffgggghhhh".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn chromium_profile_directory_names_are_safe_to_store() {

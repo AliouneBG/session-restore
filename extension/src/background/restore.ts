@@ -4,12 +4,17 @@
  * Ordering and the lazy-loading strategy come from docs/04-restore.md. The two rules
  * that matter most are enforced in `plan.ts`, not here: diff before creating, and
  * never close anything.
+ *
+ * `closeRestoredTabs` at the bottom is the one exception, and it is not a hole in that
+ * rule. A restore never closes; *undoing* one closes only what that same restore
+ * created, and only while the tab still shows the URL it was created with.
  */
 
 import { hasCap } from "../shared/caps.js";
 import { isRestorable } from "../shared/normalize.js";
 import { orderForCreation, planRestore, type OpenTab } from "./plan.js";
 import type {
+  CloseTabsBody,
   RestoreResultItem,
   RestoreSessionBody,
   RestoreTab,
@@ -176,4 +181,48 @@ async function createTab(windowId: number, tab: RestoreTab, lazy: boolean): Prom
 
 function describe(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Closes tabs a restore opened.
+ *
+ * Putting windows back is only half an undo: it never removes what the restore added.
+ * This is the other half, and it is deliberately narrow in two ways.
+ *
+ * The agent sends only URLs it recorded itself as having *created*, never ones that
+ * were already open when the restore ran. And a tab only closes if it is still showing
+ * that exact URL, so one the user has since navigated away from is left alone. Both
+ * rules point the same way: closing the wrong tab destroys work, and leaving one open
+ * costs a click.
+ */
+export async function closeRestoredTabs(
+  body: CloseTabsBody,
+): Promise<{ closed: number; notFound: number }> {
+  const wanted = new Set(body.urls);
+  if (wanted.size === 0) return { closed: 0, notFound: 0 };
+
+  let all: chrome.tabs.Tab[] = [];
+  try {
+    all = await chrome.tabs.query({});
+  } catch {
+    return { closed: 0, notFound: wanted.size };
+  }
+
+  const matched = all.filter((t) => typeof t.url === "string" && wanted.has(t.url));
+  const ids = matched
+    .map((t) => t.id)
+    .filter((id): id is number => typeof id === "number");
+
+  let closed = 0;
+  for (const id of ids) {
+    try {
+      await chrome.tabs.remove(id);
+      closed += 1;
+    } catch {
+      // The tab went away on its own between the query and the close, which is the
+      // outcome we wanted anyway.
+    }
+  }
+
+  return { closed, notFound: Math.max(0, wanted.size - closed) };
 }

@@ -1,0 +1,306 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Undo the last restore</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --card: #ffffff;
+        --fg: #1b1b1f;
+        --muted: #62626b;
+        --line: #e3e3e8;
+        --hover: #f4f4f7;
+        --accent: #2f6fd0;
+        --accent-fg: #ffffff;
+        --ok: #1a7f4b;
+        --ok-bg: #eaf7f0;
+        --shadow: 0 1px 2px rgba(16, 16, 20, .06), 0 8px 24px rgba(16, 16, 20, .05);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #1a1a1e;
+          --card: #232329;
+          --fg: #eeeef2;
+          --muted: #9a9aa4;
+          --line: #35353c;
+          --hover: #2a2a30;
+          --accent: #6ea8fe;
+          --accent-fg: #10131a;
+          --ok: #5fd39b;
+          --ok-bg: #16281f;
+          --shadow: 0 1px 2px rgba(0, 0, 0, .35), 0 8px 24px rgba(0, 0, 0, .3);
+        }
+      }
+
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 13.5px/1.55 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+      }
+
+      header { flex: none; padding: 18px 22px 12px; border-bottom: 1px solid var(--line); }
+      header .row { display: flex; align-items: flex-start; gap: 12px; }
+      header .titles { flex: 1; min-width: 0; }
+      h1 { font-size: 15.5px; margin: 0 0 2px; font-weight: 600; }
+      .sub { color: var(--muted); font-size: 12.5px; }
+
+      main { flex: 1; overflow-y: auto; padding: 6px 22px 16px; }
+      main::-webkit-scrollbar { width: 10px; }
+      main::-webkit-scrollbar-thumb { background: var(--line); border-radius: 5px; }
+      main::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+      h2 {
+        font-size: 11.5px;
+        text-transform: uppercase;
+        letter-spacing: .06em;
+        color: var(--muted);
+        margin: 18px 0 8px;
+        font-weight: 600;
+      }
+
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        box-shadow: var(--shadow);
+        overflow: hidden;
+      }
+      .item { display: flex; align-items: center; gap: 12px; padding: 12px 15px; }
+      .item + .item { border-top: 1px solid var(--line); }
+      .item .text { flex: 1; min-width: 0; }
+      .item .label { font-weight: 500; }
+      .item .hint { color: var(--muted); font-size: 12.5px; margin-top: 1px; }
+
+      ul.tabs { list-style: none; margin: 0; padding: 0; }
+      ul.tabs li {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 7px 15px;
+        min-width: 0;
+      }
+      ul.tabs li + li { border-top: 1px solid var(--line); }
+      ul.tabs li:hover { background: var(--hover); }
+      ul.tabs label {
+        flex: 1;
+        min-width: 0;
+        cursor: pointer;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      input[type="checkbox"] { margin: 0; accent-color: var(--accent); flex: none; }
+
+      button {
+        font: inherit;
+        cursor: pointer;
+        border-radius: 7px;
+        border: 1px solid var(--line);
+        background: transparent;
+        color: var(--fg);
+        padding: 6px 14px;
+        white-space: nowrap;
+      }
+      button:hover { background: var(--hover); }
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: var(--accent-fg);
+        font-weight: 500;
+      }
+      button.primary:hover { filter: brightness(1.08); background: var(--accent); }
+      button:disabled { opacity: .5; cursor: default; }
+      button.linkish {
+        border: none;
+        background: none;
+        color: var(--muted);
+        text-decoration: underline;
+        padding: 0;
+        font-size: 12.5px;
+      }
+      button.linkish:hover { color: var(--fg); background: none; }
+      :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+      footer {
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 22px 16px;
+        border-top: 1px solid var(--line);
+      }
+      footer .spacer { flex: 1; }
+      .done { color: var(--ok); font-size: 12.5px; opacity: 0; transition: opacity .2s; }
+      .done.show { opacity: 1; }
+      .empty { color: var(--muted); padding: 18px 2px; }
+
+      @media (prefers-reduced-motion: no-preference) {
+        .fade { animation: rise .3s cubic-bezier(.2, .7, .3, 1) both; }
+      }
+      @keyframes rise {
+        from { opacity: 0; transform: translateY(6px); }
+        to { opacity: 1; transform: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="row">
+        <div class="titles">
+          <h1>Undo the last restore</h1>
+          <div class="sub" id="sub">Loading</div>
+        </div>
+        <button class="linkish" id="selectall" hidden>Select none</button>
+      </div>
+    </header>
+
+    <main id="main"></main>
+
+    <footer>
+      <span class="done" id="done">Done</span>
+      <div class="spacer"></div>
+      <button id="close">Close</button>
+    </footer>
+
+    <script>
+      const send = (msg) => window.ipc.postMessage(JSON.stringify(msg));
+      let data = null;
+
+      const esc = (s) =>
+        String(s).replace(/[&<>"']/g, (c) =>
+          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+        );
+
+      function flashDone(text) {
+        const el = document.getElementById("done");
+        el.textContent = text;
+        el.classList.add("show");
+        clearTimeout(flashDone.t);
+        flashDone.t = setTimeout(() => el.classList.remove("show"), 2600);
+      }
+
+      function render() {
+        if (!data) return;
+        const n = data.tabs.length;
+        document.getElementById("sub").textContent = data.can_undo
+          ? `The last restore opened ${n} tab${n === 1 ? "" : "s"}.`
+          : "There is no restore to undo.";
+
+        const main = document.getElementById("main");
+        main.innerHTML = `
+          <h2 class="fade">Put things back</h2>
+          <div class="card fade">
+            <div class="item">
+              <div class="text">
+                <div class="label">Move my windows back</div>
+                <div class="hint">
+                  Returns applications and windows to where they were before the restore.
+                  Nothing is closed.
+                </div>
+              </div>
+              <button id="windows" ${data.can_undo ? "" : "disabled"}>Move back</button>
+            </div>
+          </div>
+
+          <h2 class="fade">Tabs this restore opened</h2>
+          ${
+            n === 0
+              ? `<div class="empty">Nothing to close. Tabs that were already open when the
+                 restore ran are not listed, because the restore did not open them.</div>`
+              : `<div class="card fade">
+                   <ul class="tabs">
+                     ${data.tabs
+                       .map(
+                         (t, i) => `
+                       <li>
+                         <input type="checkbox" id="t${i}" data-url="${esc(t.url)}" checked />
+                         <label for="t${i}" title="${esc(t.url)}">${esc(t.label)}</label>
+                       </li>`,
+                       )
+                       .join("")}
+                   </ul>
+                 </div>
+                 <div style="margin-top:12px;display:flex;align-items:center;gap:10px">
+                   <button class="primary" id="closetabs">Close selected</button>
+                   <span class="hint" style="color:var(--muted);font-size:12.5px">
+                     A tab you have since navigated away from is left alone.
+                   </span>
+                 </div>`
+          }
+        `;
+
+        document.getElementById("selectall").hidden = n === 0;
+        wire();
+        updateSelection();
+      }
+
+      function boxes() {
+        return [...document.querySelectorAll("input[data-url]")];
+      }
+
+      function updateSelection() {
+        const all = boxes();
+        const on = all.filter((b) => b.checked).length;
+        const btn = document.getElementById("closetabs");
+        if (btn) {
+          btn.disabled = on === 0;
+          btn.textContent = on ? `Close selected (${on})` : "Close selected";
+        }
+        const toggle = document.getElementById("selectall");
+        const allOn = all.length > 0 && on === all.length;
+        toggle.textContent = allOn ? "Select none" : "Select all";
+        toggle.dataset.action = allOn ? "none" : "all";
+      }
+
+      function wire() {
+        const windows = document.getElementById("windows");
+        if (windows) {
+          windows.addEventListener("click", () => {
+            windows.disabled = true;
+            send({ action: "undo_windows" });
+          });
+        }
+
+        const closetabs = document.getElementById("closetabs");
+        if (closetabs) {
+          closetabs.addEventListener("click", () => {
+            const urls = boxes()
+              .filter((b) => b.checked)
+              .map((b) => b.dataset.url);
+            if (!urls.length) return;
+            closetabs.disabled = true;
+            send({ action: "close_tabs", urls });
+          });
+        }
+
+        for (const b of boxes()) b.addEventListener("change", updateSelection);
+      }
+
+      document.getElementById("selectall").addEventListener("click", () => {
+        const want = document.getElementById("selectall").dataset.action === "all";
+        for (const b of boxes()) b.checked = want;
+        updateSelection();
+      });
+
+      window.srUndo = (payload) => {
+        data = payload;
+        render();
+      };
+      window.srUndoDone = (message) => flashDone(message);
+
+      document.getElementById("close").addEventListener("click", () => send({ action: "close" }));
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") send({ action: "close" });
+      });
+
+      send({ action: "ready" });
+    </script>
+  </body>
+</html>

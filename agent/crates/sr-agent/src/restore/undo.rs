@@ -73,6 +73,84 @@ impl UndoOutcome {
     }
 }
 
+/// A tab a restore opened, offered back so the user can close it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OpenedTab {
+    pub url: String,
+    /// What to show in a list. The URL is the identity; this is for reading.
+    pub label: String,
+    pub browser: String,
+}
+
+/// The most recent restore, and the tabs it actually created.
+///
+/// Only rows recorded as `launched`. A `placed` row is a tab that was *already open*
+/// when the restore ran, which the restore deliberately left alone. Offering to close
+/// those would be offering to close the user's own tabs and calling it an undo.
+pub fn tabs_opened_by_last_restore(db: &Db) -> Result<(Option<i64>, Vec<OpenedTab>)> {
+    let run: Option<i64> = db
+        .conn
+        .query_row(
+            "SELECT id FROM restore_runs ORDER BY started_at DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    let Some(run_id) = run else {
+        return Ok((None, Vec::new()));
+    };
+
+    let mut stmt = db.conn.prepare(
+        "SELECT item_key FROM restore_items
+         WHERE run_id = ?1 AND item_kind = 'tab' AND status = 'launched'
+         ORDER BY item_key",
+    )?;
+    let urls: Vec<String> = stmt
+        .query_map([run_id], |r| r.get(0))?
+        .filter_map(Result::ok)
+        .collect();
+    drop(stmt);
+
+    // Which browser to ask. A run belongs to one browser, and the snapshot's windows
+    // say which; falling back to chrome would send the request to the wrong place.
+    let browser: String = db
+        .conn
+        .query_row(
+            "SELECT DISTINCT w.browser FROM browser_windows w
+             JOIN restore_runs r ON r.snapshot_id = w.snapshot_id
+             WHERE r.id = ?1 LIMIT 1",
+            [run_id],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| "chrome".to_string());
+
+    let tabs = urls
+        .into_iter()
+        .map(|url| OpenedTab {
+            label: readable(&url),
+            browser: browser.clone(),
+            url,
+        })
+        .collect();
+
+    Ok((Some(run_id), tabs))
+}
+
+/// A URL shortened to something worth reading in a list.
+fn readable(url: &str) -> String {
+    let trimmed = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("www.");
+    let cut = trimmed.find('?').unwrap_or(trimmed.len());
+    let short = &trimmed[..cut];
+    if short.len() > 70 {
+        format!("{}...", &short[..67])
+    } else {
+        short.to_string()
+    }
+}
+
 /// Whether there is anything to undo, without doing it.
 ///
 /// Used to decide whether the interface should offer the option at all, because a menu
@@ -198,6 +276,53 @@ mod tests {
 
     /// The message has to say that nothing was closed. Undoing a restore and finding
     /// the extra windows still there is confusing unless it was stated.
+    /// Only what the restore created. A `placed` row was a tab the user already had
+    /// open, and offering to close it would be offering to close their own work.
+    #[test]
+    fn only_tabs_the_restore_created_are_offered_for_closing() {
+        let (_d, db) = db();
+        db.conn
+            .execute(
+                "INSERT INTO restore_runs (id, snapshot_id, started_at, mode)
+                 VALUES (5, 1, 100, 'ask')",
+                [],
+            )
+            .unwrap();
+        for (url, status) in [
+            ("https://created.test/", "launched"),
+            ("https://already-open.test/", "placed"),
+            ("https://failed.test/", "failed"),
+        ] {
+            db.conn
+                .execute(
+                    "INSERT INTO restore_items (run_id, item_kind, item_key, status)
+                     VALUES (5, 'tab', ?1, ?2)",
+                    rusqlite::params![url, status],
+                )
+                .unwrap();
+        }
+
+        let (run, tabs) = tabs_opened_by_last_restore(&db).unwrap();
+        assert_eq!(run, Some(5));
+        let urls: Vec<&str> = tabs.iter().map(|t| t.url.as_str()).collect();
+        assert_eq!(urls, vec!["https://created.test/"]);
+    }
+
+    #[test]
+    fn nothing_is_offered_when_no_restore_has_run() {
+        let (_d, db) = db();
+        let (run, tabs) = tabs_opened_by_last_restore(&db).unwrap();
+        assert_eq!(run, None);
+        assert!(tabs.is_empty());
+    }
+
+    #[test]
+    fn a_label_is_readable_without_losing_the_url() {
+        let t = readable("https://www.example.com/a/b?utm_source=x&very=long");
+        assert_eq!(t, "example.com/a/b");
+        assert!(readable(&format!("https://x.test/{}", "a".repeat(200))).len() <= 70);
+    }
+
     #[test]
     fn the_message_says_what_was_deliberately_not_done() {
         let outcome = UndoOutcome::Restored {

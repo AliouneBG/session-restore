@@ -397,6 +397,40 @@ pub fn connected_browsers(shared: &Arc<Shared>) -> Vec<String> {
     out
 }
 
+/// Asks a browser to close tabs a restore opened.
+///
+/// Returns how many connections the request reached. Nothing is closed here: the
+/// extension decides, and it only closes a tab still showing the exact URL it was
+/// created with, so one the user has since navigated away from survives.
+pub fn close_tabs(shared: &Arc<Shared>, browser: &str, run_id: i64, urls: &[String]) -> usize {
+    if urls.is_empty() {
+        return 0;
+    }
+    let env = Envelope::new(
+        "close_tabs",
+        serde_json::json!({ "run_id": run_id, "urls": urls }),
+    );
+
+    let targets: Vec<Arc<Mutex<sr_ipc::PipeConnection>>> = {
+        let conns = shared.connections.lock().unwrap();
+        conns
+            .iter()
+            .filter(|c| c.browser == browser)
+            .map(|c| Arc::clone(&c.writer))
+            .collect()
+    };
+
+    let mut sent = 0usize;
+    for writer in targets {
+        match write_one(&writer, &env) {
+            Ok(()) => sent += 1,
+            Err(e) => tracing::warn!(browser, error = %e, "could not ask the browser to close tabs"),
+        }
+    }
+    tracing::info!(browser, run_id, tabs = urls.len(), sent, "asked to close restored tabs");
+    sent
+}
+
 /// Tells every connected browser that the settings changed.
 ///
 /// Without this a setting toggled in the settings window reached the extension only
@@ -512,16 +546,63 @@ fn dispatch(env: &Envelope, shared: &Shared, profile_override: Option<&str>) -> 
             );
 
             // The profile *directory*, which is the only thing that can reopen a
-            // specific profile later. profile_key cannot: it is a hash, deliberately.
-            // Resolved from the browser's command line when a launch named one, and
-            // otherwise from Chromium's own record of the last profile used.
+            // specific profile later. `profile_key` cannot: it is a hash, deliberately.
+            //
+            // Three sources, best first:
+            //
+            // 1. Where the extension's own storage lives on disk. Chromium files
+            //    `storage.local` under the profile directory, so the directory holding
+            //    this extension's profile id *is* its profile. Nothing is inferred.
+            // 2. The browser's command line, when a launch named a profile.
+            // 3. Chromium's record of the last profile used, which answers a subtly
+            //    different question and is only right by coincidence when two profiles
+            //    are open at once.
+            let mut profile_dir_source = "none";
             let profile_dir = env
-                .src
-                .as_ref()
-                .and_then(|s| s.browser_pid)
-                .and_then(|pid| crate::watcher::processes::read_command_line(pid).ok())
-                .and_then(|cmd| crate::watcher::profiles::resolve_profile_dir(browser, Some(&cmd)))
-                .or_else(|| crate::watcher::profiles::last_used_profile_dir(browser));
+                .body
+                .get("profile_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .and_then(|id| {
+                    let dir = crate::data_dir().ok()?;
+                    let ids = crate::watcher::profiles::registered_extension_ids(&dir);
+                    let found =
+                        crate::watcher::profiles::directory_for_profile_id(browser, &ids, id);
+                    if found.is_some() {
+                        profile_dir_source = "extension storage on disk";
+                    }
+                    found
+                })
+                .or_else(|| {
+                    env.src
+                        .as_ref()
+                        .and_then(|s| s.browser_pid)
+                        .and_then(|pid| crate::watcher::processes::read_command_line(pid).ok())
+                        .and_then(|cmd| {
+                            let found =
+                                crate::watcher::profiles::profile_dir_from_command_line(&cmd);
+                            if found.is_some() {
+                                profile_dir_source = "command line";
+                            }
+                            found
+                        })
+                })
+                .or_else(|| {
+                    let found = crate::watcher::profiles::last_used_profile_dir(browser);
+                    if found.is_some() {
+                        profile_dir_source = "last used (a guess)";
+                    }
+                    found
+                });
+
+            if let Some(dir) = profile_dir.as_deref() {
+                tracing::info!(
+                    browser,
+                    profile_dir = dir,
+                    source = profile_dir_source,
+                    "resolved the browser profile"
+                );
+            }
 
             // Recorded so the settings and onboarding windows can show the real state
             // of each browser. Whether the browser granted private-window access is
@@ -564,6 +645,26 @@ fn dispatch(env: &Envelope, shared: &Shared, profile_override: Option<&str>) -> 
                 Err(e) => tracing::warn!(error = %e, "could not build a restore offer"),
             }
             Ok(out)
+        }
+
+        "close_tabs_result" => {
+            let closed = env.body.get("closed").and_then(|v| v.as_i64()).unwrap_or(0);
+            let not_found = env.body.get("not_found").and_then(|v| v.as_i64()).unwrap_or(0);
+            let run_id = env.body.get("run_id").and_then(|v| v.as_i64()).unwrap_or(0);
+            tracing::info!(browser, run_id, closed, not_found, "tabs closed");
+
+            // Recorded so the same tab is not offered again next time. A tab the user
+            // navigated away from is left as it was, and stays in the list, which is
+            // the honest outcome: it was not closed.
+            if closed > 0 {
+                let db = shared.db.lock().unwrap();
+                let _ = db.conn.execute(
+                    "UPDATE restore_items SET status = 'skipped', detail = 'closed by undo'
+                     WHERE run_id = ?1 AND item_kind = 'tab' AND status = 'launched'",
+                    [run_id],
+                );
+            }
+            Ok(vec![])
         }
 
         "tab_delta" => {

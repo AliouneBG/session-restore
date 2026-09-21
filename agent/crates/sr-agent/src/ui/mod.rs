@@ -12,6 +12,7 @@ pub mod onboarding;
 pub mod review;
 pub mod settings;
 pub mod tray;
+pub mod undo_window;
 
 use crate::store::db::Db;
 use crate::store::keys::KeyManager;
@@ -44,6 +45,10 @@ enum UserEvent {
     SettingsIpc(String),
     /// A message from the first-run flow.
     OnboardingIpc(String),
+    /// A message from the undo window.
+    UndoIpc(String),
+    /// A launch asked for the undo window specifically.
+    ShowUndo,
     Menu(tray_icon::menu::MenuId),
 }
 
@@ -72,6 +77,14 @@ pub fn run_app(ctx: UiContext) -> Result<()> {
             let _ = proxy.send_event(UserEvent::ShowUi);
         }) {
             tracing::warn!(error = %e, "not listening for further launches");
+        }
+    }
+    {
+        let proxy = proxy.clone();
+        if let Err(e) = crate::single_instance::listen_for_show_undo(move || {
+            let _ = proxy.send_event(UserEvent::ShowUndo);
+        }) {
+            tracing::warn!(error = %e, "not listening for undo requests");
         }
     }
 
@@ -144,6 +157,7 @@ pub fn run_app(ctx: UiContext) -> Result<()> {
     let mut review_snapshot: Option<i64> = None;
     let mut settings_window: Option<(tao::window::Window, wry::WebView)> = None;
     let mut onboarding_window: Option<(tao::window::Window, wry::WebView)> = None;
+    let mut undo_window: Option<(tao::window::Window, wry::WebView)> = None;
     let mut open_at_start = ctx.review_at_start;
     let mut onboard_at_start = ctx.onboard_at_start;
 
@@ -209,25 +223,25 @@ pub fn run_app(ctx: UiContext) -> Result<()> {
                         None => tracing::info!("nothing to restore"),
                     }
                 } else if id == tray.undo_id {
-                    // Off the message pump: undo re-places windows and can relaunch
-                    // applications, which is the same work a restore does.
-                    let db = Arc::clone(&db);
-                    std::thread::spawn(move || {
-                        let outcome = {
-                            let db = db.lock().unwrap();
-                            crate::restore::undo::undo_last(&db)
-                        };
-                        match outcome {
-                            Ok(o) => {
-                                tracing::info!(outcome = ?o, "undo finished");
-                                notify("Undo", &o.message());
-                            }
-                            Err(e) => {
-                                tracing::error!(error = %e, "undo failed");
-                                notify("Undo", &format!("Could not undo: {e:#}"));
-                            }
-                        }
-                    });
+                    // A window rather than an immediate action. Undo has two halves
+                    // with different risks: moving windows back changes nothing you
+                    // cannot see, while closing tabs destroys something. The second
+                    // one has to be a choice, per tab.
+                    if let Some((window, _)) = undo_window.as_ref() {
+                        window.set_focus();
+                        return;
+                    }
+                    match open_window(
+                        target,
+                        &proxy,
+                        "Undo the last restore",
+                        undo_window::UNDO_HTML,
+                        (560.0, 560.0),
+                        UserEvent::UndoIpc,
+                    ) {
+                        Ok(w) => undo_window = Some(w),
+                        Err(e) => tracing::error!(error = %e, "could not open the undo window"),
+                    }
                 } else if id == tray.settings_id {
                     if settings_window.is_some() {
                         return;
@@ -287,6 +301,114 @@ pub fn run_app(ctx: UiContext) -> Result<()> {
                 ) {
                     Ok(w) => settings_window = Some(w),
                     Err(e) => tracing::error!(error = %e, "could not open settings"),
+                }
+            }
+
+            Event::UserEvent(UserEvent::ShowUndo) => {
+                if let Some((window, _)) = undo_window.as_ref() {
+                    window.set_focus();
+                    return;
+                }
+                match open_window(
+                    target,
+                    &proxy,
+                    "Undo the last restore",
+                    undo_window::UNDO_HTML,
+                    (560.0, 560.0),
+                    UserEvent::UndoIpc,
+                ) {
+                    Ok(w) => undo_window = Some(w),
+                    Err(e) => tracing::error!(error = %e, "could not open the undo window"),
+                }
+            }
+
+            Event::UserEvent(UserEvent::UndoIpc(body)) => {
+                let Some((_, webview)) = undo_window.as_ref() else {
+                    return;
+                };
+                let Ok(action) = serde_json::from_str::<undo_window::UndoAction>(&body) else {
+                    return;
+                };
+
+                match action {
+                    undo_window::UndoAction::Close => {
+                        undo_window = None;
+                        return;
+                    }
+                    undo_window::UndoAction::UndoWindows => {
+                        // Off the message pump: this re-places windows and can relaunch
+                        // applications, which is the same work a restore does.
+                        let db = Arc::clone(&db);
+                        let proxy = proxy.clone();
+                        std::thread::spawn(move || {
+                            let outcome = {
+                                let db = db.lock().unwrap();
+                                crate::restore::undo::undo_last(&db)
+                            };
+                            let message = match outcome {
+                                Ok(o) => o.message(),
+                                Err(e) => format!("Could not undo: {e:#}"),
+                            };
+                            let _ = proxy.send_event(UserEvent::UndoIpc(
+                                serde_json::json!({ "action": "ready", "note": message })
+                                    .to_string(),
+                            ));
+                        });
+                    }
+                    undo_window::UndoAction::CloseTabs { urls } => {
+                        let (run_id, browser) = {
+                            let db = db.lock().unwrap();
+                            let payload = undo_window::collect(&db).ok();
+                            (
+                                payload.as_ref().and_then(|p| p.run_id).unwrap_or(0),
+                                payload
+                                    .as_ref()
+                                    .and_then(|p| undo_window::browser_for(&p.tabs))
+                                    .unwrap_or_else(|| "chrome".into()),
+                            )
+                        };
+                        let sent = crate::server::close_tabs(&shared, &browser, run_id, &urls);
+                        if sent == 0 {
+                            let _ = webview.evaluate_script(
+                                "window.srUndoDone('That browser is not connected right now.')",
+                            );
+                        } else {
+                            let note = format!(
+                                "Asked {browser} to close {} tab(s).",
+                                urls.len()
+                            );
+                            let literal = serde_json::to_string(&note)
+                                .unwrap_or_else(|_| "\"\"".to_string());
+                            let _ = webview.evaluate_script(&format!(
+                                "window.srUndoDone({literal})"
+                            ));
+                        }
+                    }
+                    undo_window::UndoAction::Ready => {}
+                }
+
+                // Always re-render from fresh state, so the list reflects what is
+                // actually left rather than what was there when the window opened.
+                let payload = {
+                    let db = db.lock().unwrap();
+                    undo_window::collect(&db)
+                };
+                if let Ok(p) = payload {
+                    if let Ok(json) = serde_json::to_string(&p) {
+                        let _ = webview.evaluate_script(&format!("window.srUndo({json})"));
+                    }
+                }
+                if let Some(note) = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v.get("note").and_then(|n| n.as_str()).map(str::to_string))
+                {
+                    // JSON-encoded rather than hand-escaped: this is
+                    // interpolated into JavaScript, and a quote or a backslash
+                    // in the message would otherwise end the string early.
+                    let literal = serde_json::to_string(&note)
+                        .unwrap_or_else(|_| "\"\"".to_string());
+                    let _ = webview
+                        .evaluate_script(&format!("window.srUndoDone({literal})"));
                 }
             }
 
@@ -442,7 +564,9 @@ pub fn run_app(ctx: UiContext) -> Result<()> {
                     w.as_ref().map(|(win, _)| win.id() == window_id).unwrap_or(false)
                 };
 
-                if is(&settings_window) {
+                if is(&undo_window) {
+                    undo_window = None;
+                } else if is(&settings_window) {
                     settings_window = None;
                 } else if is(&onboarding_window) {
                     // Closing the welcome flow counts as finishing it. Showing it again
@@ -544,27 +668,6 @@ fn open_window(
         .build(&window)?;
 
     Ok((window, webview))
-}
-
-/// Tells the user the outcome of something they asked for from the tray.
-///
-/// A message box rather than a toast: toasts need a registered AppUserModelID and a
-/// shortcut in the Start Menu to be delivered reliably, and an undo that silently did
-/// nothing visible is exactly the case that needs a definite answer.
-#[cfg(windows)]
-fn notify(title: &str, message: &str) {
-    use windows::core::HSTRING;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        MessageBoxW, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND,
-    };
-    unsafe {
-        MessageBoxW(
-            None,
-            &HSTRING::from(message),
-            &HSTRING::from(format!("Session Restore - {title}")),
-            MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
-        );
-    }
 }
 
 /// Matches the window caption to the system's app theme.

@@ -15,7 +15,7 @@ import { attach } from "./collector.js";
 import { emptyState, Outbox, type PendingState } from "./outbox.js";
 import { AgentPort } from "./port.js";
 import { ALARM_NAME, runReconcile, scheduleReconcile } from "./reconcile.js";
-import { applyRestore } from "./restore.js";
+import { applyRestore, closeRestoredTabs } from "./restore.js";
 import type { StateBody } from "../shared/protocol.generated.js";
 
 const OUTBOX_KEY = "sr_outbox";
@@ -87,6 +87,20 @@ const port = new AgentPort({
           } catch {
             // The agent records its own per-item outcomes; losing the echo is not
             // worth failing a restore over.
+          }
+        });
+        break;
+
+      case "close_tabs":
+        void closeRestoredTabs(msg.body).then(({ closed, notFound }) => {
+          try {
+            port.send("close_tabs_result", {
+              run_id: msg.body.run_id,
+              closed,
+              not_found: notFound,
+            } as never);
+          } catch {
+            // The agent records the request; losing the echo is not worth failing over.
           }
         });
         break;

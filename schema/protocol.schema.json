@@ -523,6 +523,33 @@
       ],
       "additionalProperties": false
     },
+    "CloseTabsBody": {
+      "type": "object",
+      "description": "Close tabs a restore opened. Undoing a restore by putting windows back is only half an undo: it never removes what the restore added. This is the other half, and it is deliberately narrow. The agent sends only URLs it recorded itself as having created, never ones that were already open, and the extension closes only tabs still showing that exact URL.",
+      "properties": {
+        "run_id": {
+          "type": "integer",
+          "description": "The restore being undone, echoed back in the result."
+        },
+        "urls": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Exact URLs to close. A tab the user has since navigated away from no longer matches and is left alone, which is the safe direction: closing the wrong tab destroys work."
+        }
+      },
+      "required": ["run_id", "urls"],
+      "additionalProperties": false
+    },
+    "CloseTabsResultBody": {
+      "type": "object",
+      "properties": {
+        "run_id": { "type": "integer" },
+        "closed": { "type": "integer" },
+        "not_found": { "type": "integer" }
+      },
+      "required": ["run_id", "closed", "not_found"],
+      "additionalProperties": false
+    },
     "SettingsChangedBody": {
       "type": "object",
       "properties": {

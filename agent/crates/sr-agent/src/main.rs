@@ -223,6 +223,22 @@ fn purge_data(dir: &std::path::Path) -> Result<usize> {
 /// Every restore writes a `pre_restore` snapshot first; this is what consumes it.
 /// Without it that snapshot was an undo point nothing could reach.
 fn cmd_undo() -> Result<()> {
+    // When the agent is running, show the window instead of acting blind. Undo has two
+    // halves with different risks, and the window is where the user chooses between
+    // them. Falling back to the headless undo keeps the command usable on a machine
+    // where the agent is not running at all.
+    if sr_agent::single_instance::acquire()?.is_none() {
+        match sr_agent::single_instance::signal_show_undo() {
+            Ok(()) => {
+                println!("Opened the undo window.");
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("could not reach the running agent ({e:#}); undoing directly");
+            }
+        }
+    }
+
     let dir = data_dir()?;
     let db = Db::open(&dir.join("sessions.db"))?;
 

@@ -14,6 +14,8 @@
 
 import type {
   AgentUnavailableBody,
+  CloseTabsBody,
+  CloseTabsResultBody,
   Envelope,
   HelloAckBody,
   HelloBody,
@@ -26,14 +28,24 @@ import type {
 export const PROTOCOL_VERSION = 1 as const;
 
 /** Messages this side sends. */
-export type OutboundType = "hello" | "tab_delta" | "full_state" | "restore_result";
+export type OutboundType =
+  | "hello"
+  | "tab_delta"
+  | "full_state"
+  | "restore_result"
+  | "close_tabs_result";
 
-export type OutboundBody = HelloBody | StateBody | RestoreResultBody;
+export type OutboundBody =
+  | HelloBody
+  | StateBody
+  | RestoreResultBody
+  | CloseTabsResultBody;
 
 /** Messages this side receives. */
 export type InboundMessage =
   | { type: "hello_ack"; body: HelloAckBody }
   | { type: "restore_session"; body: RestoreSessionBody }
+  | { type: "close_tabs"; body: CloseTabsBody }
   | { type: "settings_changed"; body: SettingsChangedBody }
   | { type: "agent_unavailable"; body: AgentUnavailableBody };
 
@@ -94,6 +106,11 @@ export function parseInbound(raw: unknown): InboundMessage | null {
       if (typeof body["run_id"] !== "number") return null;
       if (!Array.isArray(body["windows"])) return null;
       return { type: "restore_session", body: body as unknown as RestoreSessionBody };
+
+    case "close_tabs":
+      if (typeof body["run_id"] !== "number") return null;
+      if (!Array.isArray(body["urls"])) return null;
+      return { type: "close_tabs", body: body as unknown as CloseTabsBody };
 
     case "settings_changed":
       if (typeof body["capture_enabled"] !== "boolean") return null;

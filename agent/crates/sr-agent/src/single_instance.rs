@@ -45,6 +45,9 @@ unsafe impl Send for InstanceLock {}
 const MUTEX_NAME: windows::core::PCWSTR = windows::core::w!(r"Local\SessionRestore.Agent");
 #[cfg(windows)]
 const EVENT_NAME: windows::core::PCWSTR = windows::core::w!(r"Local\SessionRestore.ShowUi");
+#[cfg(windows)]
+const UNDO_EVENT_NAME: windows::core::PCWSTR =
+    windows::core::w!(r"Local\SessionRestore.ShowUndo");
 
 /// Claims the single-instance slot.
 ///
@@ -83,10 +86,24 @@ fn acquire_named(name: windows::core::PCWSTR) -> Result<Option<InstanceLock>> {
 /// to do about it, and the user can click again.
 #[cfg(windows)]
 pub fn signal_show_ui() -> Result<()> {
+    signal(EVENT_NAME)
+}
+
+/// Asks the running agent to show the undo window.
+///
+/// A separate event rather than an argument, because the running agent has no way to
+/// read the other process's command line and should not have to.
+#[cfg(windows)]
+pub fn signal_show_undo() -> Result<()> {
+    signal(UNDO_EVENT_NAME)
+}
+
+#[cfg(windows)]
+fn signal(name: windows::core::PCWSTR) -> Result<()> {
     use windows::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
 
     unsafe {
-        let handle = OpenEventW(EVENT_MODIFY_STATE, false, EVENT_NAME)?;
+        let handle = OpenEventW(EVENT_MODIFY_STATE, false, name)?;
         let r = SetEvent(handle);
         let _ = windows::Win32::Foundation::CloseHandle(handle);
         r?;
@@ -104,10 +121,27 @@ pub fn listen_for_show_ui<F>(on_signal: F) -> Result<()>
 where
     F: Fn() + Send + 'static,
 {
+    listen(EVENT_NAME, on_signal)
+}
+
+/// As [`listen_for_show_ui`], for the undo window.
+#[cfg(windows)]
+pub fn listen_for_show_undo<F>(on_signal: F) -> Result<()>
+where
+    F: Fn() + Send + 'static,
+{
+    listen(UNDO_EVENT_NAME, on_signal)
+}
+
+#[cfg(windows)]
+fn listen<F>(name: windows::core::PCWSTR, on_signal: F) -> Result<()>
+where
+    F: Fn() + Send + 'static,
+{
     use windows::Win32::Foundation::WAIT_OBJECT_0;
     use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
 
-    let handle = unsafe { CreateEventW(None, false, false, EVENT_NAME)? };
+    let handle = unsafe { CreateEventW(None, false, false, name)? };
     let lock = InstanceLock { handle };
 
     std::thread::spawn(move || {
@@ -137,6 +171,19 @@ pub fn acquire() -> anyhow::Result<Option<InstanceLock>> {
 
 #[cfg(not(windows))]
 pub fn signal_show_ui() -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn signal_show_undo() -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn listen_for_show_undo<F>(_f: F) -> anyhow::Result<()>
+where
+    F: Fn() + Send + 'static,
+{
     Ok(())
 }
 
