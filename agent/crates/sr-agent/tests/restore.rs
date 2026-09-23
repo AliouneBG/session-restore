@@ -692,9 +692,14 @@ fn a_browser_that_connects_before_the_review_is_answered_waits_for_it() {
     assert_eq!(tabs[0]["url"], "https://two.test/");
 }
 
-/// Dismissing decides nothing, but it must still release a browser left waiting.
+/// Dismissing must release a browser that was made to wait, without restoring.
+///
+/// This test used to assert the opposite, that dismissal delivered the offer, and it
+/// was wrong in the way that matters: closing the review window and opening a browser
+/// later silently reopened the entire previous session. The release is still required,
+/// or the browser waits forever, but what gets released is a refusal.
 #[test]
-fn dismissing_the_review_releases_a_waiting_browser() {
+fn dismissing_the_review_releases_a_waiting_browser_without_restoring() {
     let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
     {
         let mut pending = h.shared.pending_restore.lock().unwrap();
@@ -713,10 +718,13 @@ fn dismissing_the_review_releases_a_waiting_browser() {
     }
     sr_agent::server::offer_to_connected(&h.shared);
 
+    // Released, but with nothing to restore. A third hello proves no offer arrived and
+    // that the connection is still being served rather than stuck.
+    send(&mut c, hello("chrome"));
     assert_eq!(
         recv(&mut c).kind,
-        "restore_session",
-        "a dismissed review left the browser waiting forever"
+        "hello_ack",
+        "a dismissed review restored the session anyway"
     );
 }
 
@@ -1161,4 +1169,104 @@ fn an_extension_that_reports_no_profile_still_works() {
     let mut c = h.connect();
     send(&mut c, hello("firefox"));
     assert_eq!(recv(&mut c).kind, "hello_ack");
+}
+
+/// The bug a user hit: close the review window, open a browser later, and the whole
+/// previous session came back anyway.
+///
+/// Dismissal used to only clear the waiting flag, leaving `selection` as `None`, which
+/// the offer path reads as "there was no review to consult" and answers by offering
+/// everything. Closing the window is a refusal of the automatic restore, not an absence
+/// of an answer.
+#[test]
+fn closing_the_review_window_does_not_restore_anything() {
+    let h = Harness::with_previous_session(&[
+        ("w-old:t1", "https://one.test/"),
+        ("w-old:t2", "https://two.test/"),
+    ]);
+    {
+        let mut pending = h.shared.pending_restore.lock().unwrap();
+        *pending = PendingRestore::awaiting_review(pending.snapshot_id);
+        // Exactly what the window's close button does.
+        pending.review_dismissed();
+    }
+
+    let mut c = h.connect();
+    send(&mut c, hello("chrome"));
+    assert_eq!(recv(&mut c).kind, "hello_ack");
+
+    // A second hello proves nothing was sent in between.
+    send(&mut c, hello("chrome"));
+    assert_eq!(
+        recv(&mut c).kind,
+        "hello_ack",
+        "a dismissed review still restored the session"
+    );
+}
+
+/// Dismissing is "not now", not "never". The session has to survive so the tray can
+/// still restore it, and confirming there has to actually reach the browser.
+#[test]
+fn a_browser_can_still_be_offered_after_the_user_changes_their_mind() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    {
+        let mut pending = h.shared.pending_restore.lock().unwrap();
+        *pending = PendingRestore::awaiting_review(pending.snapshot_id);
+        pending.review_dismissed();
+    }
+
+    let mut c = h.connect();
+    send(&mut c, hello("chrome"));
+    assert_eq!(recv(&mut c).kind, "hello_ack");
+    send(&mut c, hello("chrome"));
+    assert_eq!(recv(&mut c).kind, "hello_ack", "offered a dismissed restore");
+
+    // The user reopens the review from the tray and confirms.
+    {
+        let mut pending = h.shared.pending_restore.lock().unwrap();
+        pending.set_selection(BrowserSelection {
+            windows: ["w-old".to_string()].into_iter().collect(),
+            tabs: Default::default(),
+            declined: false,
+            restore_private: false,
+        });
+    }
+    sr_agent::server::offer_to_connected(&h.shared);
+
+    let offer = recv(&mut c);
+    assert_eq!(
+        offer.kind, "restore_session",
+        "declining consumed the offer, so changing your mind did nothing"
+    );
+    assert_eq!(offer.body["windows"][0]["tabs"].as_array().unwrap().len(), 1);
+}
+
+/// Pressing Not now is the same refusal as closing the window, and must behave the same.
+#[test]
+fn not_now_and_closing_the_window_agree() {
+    for dismissed_by_closing in [true, false] {
+        let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+        {
+            let mut pending = h.shared.pending_restore.lock().unwrap();
+            *pending = PendingRestore::awaiting_review(pending.snapshot_id);
+            if dismissed_by_closing {
+                pending.review_dismissed();
+            } else {
+                pending.set_selection(BrowserSelection {
+                    declined: true,
+                    ..Default::default()
+                });
+            }
+        }
+
+        let mut c = h.connect();
+        send(&mut c, hello("chrome"));
+        assert_eq!(recv(&mut c).kind, "hello_ack");
+        send(&mut c, hello("chrome"));
+        assert_eq!(
+            recv(&mut c).kind,
+            "hello_ack",
+            "closing={dismissed_by_closing} restored without consent"
+        );
+    }
 }

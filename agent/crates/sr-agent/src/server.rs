@@ -109,13 +109,23 @@ impl PendingRestore {
         self.awaiting_review
     }
 
-    /// Ends the wait without deciding anything.
+    /// Closing the review window without choosing.
     ///
-    /// Dismissing the review window decides nothing (treating a closed window as
-    /// consent would restore a session the user never agreed to), but it does have to
-    /// release browsers that are waiting on an answer, or their offer never arrives.
+    /// This is a refusal of the *automatic* restore, not an absence of an answer, and
+    /// getting that backwards was a real bug. Dismissal used to only clear the waiting
+    /// flag and leave `selection` as `None`, which the offer path reads as "there was
+    /// no review to consult" and answers by restoring everything. So closing the window
+    /// and opening a browser an hour later silently reopened the whole previous
+    /// session: the one outcome the person had just declined by closing it.
+    ///
+    /// It is deliberately not a permanent refusal. The snapshot stays, and the tray's
+    /// Restore last session reopens the review window, where confirming overrides this.
     pub fn review_dismissed(&mut self) {
         self.awaiting_review = false;
+        self.selection = Some(BrowserSelection {
+            declined: true,
+            ..Default::default()
+        });
     }
 
     /// Records what the review window decided for browser windows and tabs.
@@ -909,18 +919,22 @@ fn maybe_offer_restore(shared: &Shared, browser: &str, profile: &str) -> Result<
         }
 
         let selection = pending.selection();
+
+        // The refusal is checked *before* claiming, and the order matters. Claiming
+        // marks this browser as already offered, permanently for this agent run, so
+        // declining used to consume the very offer it was declining. Changing your
+        // mind afterwards, through the tray, then did nothing at all and said nothing
+        // about why.
+        if selection.as_ref().map(|s| s.declined).unwrap_or(false) {
+            tracing::info!(browser, "restore declined; leaving the offer available");
+            return Ok(None);
+        }
+
         match pending.claim(browser, profile) {
             Some(id) => (id, selection),
             None => return Ok(None),
         }
     };
-
-    // The user was asked and said no. Declining in the review has to mean declining
-    // the tabs too, not just the applications.
-    if selection.as_ref().map(|s| s.declined).unwrap_or(false) {
-        tracing::info!(browser, "restore declined in the review window");
-        return Ok(None);
-    }
 
     let db = shared.db.lock().unwrap();
 
