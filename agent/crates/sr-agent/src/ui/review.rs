@@ -86,6 +86,13 @@ pub struct ReviewChoice {
     pub tabs: Vec<String>,
     #[serde(default)]
     pub restore_private: bool,
+    /// Individual private tabs the user kept ticked after revealing them.
+    ///
+    /// Empty means every private tab, which is what `restore_private` on its own has
+    /// always meant and is the only sensible reading when the list was never revealed:
+    /// there is nothing to narrow by until the user has seen what is there.
+    #[serde(default)]
+    pub private_tabs: Vec<String>,
     #[serde(default)]
     pub never_ask_again: bool,
     #[serde(default)]

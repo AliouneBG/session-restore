@@ -341,6 +341,7 @@ fn a_review_selection_limits_which_windows_are_offered() {
             tabs: Default::default(),
             declined: false,
             restore_private: false,
+            private_tabs: Default::default(),
         });
 
     let mut c = h.connect();
@@ -368,6 +369,7 @@ fn a_review_selection_limits_which_tabs_are_offered() {
             tabs: ["w-old:t1".to_string()].into_iter().collect(),
             declined: false,
             restore_private: false,
+            private_tabs: Default::default(),
         });
 
     let mut c = h.connect();
@@ -394,6 +396,7 @@ fn declining_the_review_declines_the_tabs_too() {
             tabs: Default::default(),
             declined: true,
             restore_private: false,
+            private_tabs: Default::default(),
         });
 
     let mut c = h.connect();
@@ -681,6 +684,7 @@ fn a_browser_that_connects_before_the_review_is_answered_waits_for_it() {
             tabs: ["w-old:t2".to_string()].into_iter().collect(),
             declined: false,
             restore_private: false,
+            private_tabs: Default::default(),
         });
     }
     sr_agent::server::offer_to_connected(&h.shared);
@@ -743,6 +747,7 @@ fn a_browser_that_connects_after_the_review_is_offered_normally() {
             tabs: ["w-old:t1".to_string()].into_iter().collect(),
             declined: false,
             restore_private: false,
+            private_tabs: Default::default(),
         });
     }
 
@@ -1053,6 +1058,7 @@ fn ticking_private_windows_actually_restores_them() {
             tabs: Default::default(),
             declined: false,
             restore_private: true,
+            private_tabs: Default::default(),
         });
     }
 
@@ -1079,6 +1085,7 @@ fn not_ticking_private_windows_leaves_them_out() {
             tabs: Default::default(),
             declined: false,
             restore_private: false,
+            private_tabs: Default::default(),
         });
     }
 
@@ -1229,6 +1236,7 @@ fn a_browser_can_still_be_offered_after_the_user_changes_their_mind() {
             tabs: Default::default(),
             declined: false,
             restore_private: false,
+            private_tabs: Default::default(),
         });
     }
     sr_agent::server::offer_to_connected(&h.shared);
@@ -1269,4 +1277,183 @@ fn not_now_and_closing_the_window_agree() {
             "closing={dismissed_by_closing} restored without consent"
         );
     }
+}
+
+/// Seeds a private window with several encrypted tabs, the way ingest writes them.
+fn seed_private_window(h: &Harness, snapshot_id: i64, window: &str, tabs: &[(&str, &str)]) {
+    let db = h.shared.db.lock().unwrap();
+    db.set_setting("capture_private_windows", "true").unwrap();
+    for snap in [0i64, snapshot_id] {
+        db.conn
+            .execute(
+                "INSERT OR REPLACE INTO browser_windows (snapshot_id, browser_window_id,
+                 browser, profile_key, is_private, window_state, focused, updated_at)
+                 VALUES (?1, ?2, 'chrome', 'default', 1, 'normal', 0, 0)",
+                rusqlite::params![snap, window],
+            )
+            .unwrap();
+    }
+
+    let ctx = sr_agent::ingest::IngestCtx {
+        db: &db,
+        keys: &h.shared.keys,
+        capture_private: true,
+        private_ttl_hours: 24,
+        snapshot_id,
+    };
+    for (i, (key, url)) in tabs.iter().enumerate() {
+        let delta = sr_proto::TabDelta {
+            op: sr_proto::Op::Upsert,
+            tab_key: (*key).to_string(),
+            window_id: window.to_string(),
+            group_key: None,
+            index: Some(i as i32),
+            url: Some((*url).to_string()),
+            title: Some("private".into()),
+            favicon_hash: None,
+            pinned: false,
+            active: i == 0,
+            muted: false,
+            last_accessed: None,
+            private: true,
+            restorable: true,
+        };
+        sr_agent::ingest::ingest_tab(&delta, &ctx).unwrap();
+    }
+}
+
+fn private_urls(offer: &Envelope) -> Vec<String> {
+    offer.body["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w["private"] == true)
+        .flat_map(|w| w["tabs"].as_array().unwrap().iter())
+        .map(|t| t["url"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Choosing individual private tabs, which previously was all or nothing.
+#[test]
+fn only_the_private_tabs_that_were_ticked_come_back() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    let snapshot_id: i64 = {
+        let db = h.shared.db.lock().unwrap();
+        db.conn
+            .query_row("SELECT MAX(id) FROM snapshots", [], |r| r.get(0))
+            .unwrap()
+    };
+    seed_private_window(
+        &h,
+        snapshot_id,
+        "w-priv",
+        &[
+            ("w-priv:t1", "https://keep.test/"),
+            ("w-priv:t2", "https://drop.test/"),
+            ("w-priv:t3", "https://keep-too.test/"),
+        ],
+    );
+
+    {
+        let mut pending = h.shared.pending_restore.lock().unwrap();
+        pending.set_selection(BrowserSelection {
+            windows: ["w-old".to_string(), "w-priv".to_string()].into_iter().collect(),
+            tabs: Default::default(),
+            declined: false,
+            restore_private: true,
+            private_tabs: ["w-priv:t1".to_string(), "w-priv:t3".to_string()]
+                .into_iter()
+                .collect(),
+        });
+    }
+
+    let mut c = h.connect();
+    send(&mut c, hello("chrome"));
+    assert_eq!(recv(&mut c).kind, "hello_ack");
+
+    let offer = recv(&mut c);
+    let mut urls = private_urls(&offer);
+    urls.sort();
+    assert_eq!(
+        urls,
+        vec!["https://keep-too.test/".to_string(), "https://keep.test/".to_string()],
+        "the unticked private tab was restored anyway"
+    );
+}
+
+/// Ticking the group without revealing it has to mean all of them: there is nothing to
+/// narrow by until the user has seen what is there.
+#[test]
+fn an_empty_private_selection_means_every_private_tab() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    let snapshot_id: i64 = {
+        let db = h.shared.db.lock().unwrap();
+        db.conn
+            .query_row("SELECT MAX(id) FROM snapshots", [], |r| r.get(0))
+            .unwrap()
+    };
+    seed_private_window(
+        &h,
+        snapshot_id,
+        "w-priv",
+        &[("w-priv:t1", "https://a.test/"), ("w-priv:t2", "https://b.test/")],
+    );
+
+    {
+        let mut pending = h.shared.pending_restore.lock().unwrap();
+        pending.set_selection(BrowserSelection {
+            windows: ["w-old".to_string(), "w-priv".to_string()].into_iter().collect(),
+            tabs: Default::default(),
+            declined: false,
+            restore_private: true,
+            private_tabs: Default::default(),
+        });
+    }
+
+    let mut c = h.connect();
+    send(&mut c, hello("chrome"));
+    assert_eq!(recv(&mut c).kind, "hello_ack");
+    assert_eq!(private_urls(&recv(&mut c)).len(), 2);
+}
+
+/// Unticking every private tab must not smuggle the window back in empty.
+#[test]
+fn a_private_window_with_no_tabs_left_is_not_offered() {
+    let h = Harness::with_previous_session(&[("w-old:t1", "https://one.test/")]);
+    let snapshot_id: i64 = {
+        let db = h.shared.db.lock().unwrap();
+        db.conn
+            .query_row("SELECT MAX(id) FROM snapshots", [], |r| r.get(0))
+            .unwrap()
+    };
+    seed_private_window(&h, snapshot_id, "w-priv", &[("w-priv:t1", "https://a.test/")]);
+
+    {
+        let mut pending = h.shared.pending_restore.lock().unwrap();
+        pending.set_selection(BrowserSelection {
+            windows: ["w-old".to_string(), "w-priv".to_string()].into_iter().collect(),
+            tabs: Default::default(),
+            declined: false,
+            restore_private: true,
+            // Revealed, then every tab unticked.
+            private_tabs: ["w-priv:nothing-matches".to_string()].into_iter().collect(),
+        });
+    }
+
+    let mut c = h.connect();
+    send(&mut c, hello("chrome"));
+    assert_eq!(recv(&mut c).kind, "hello_ack");
+    let offer = recv(&mut c);
+    assert!(
+        private_urls(&offer).is_empty(),
+        "offered an empty private window"
+    );
+    assert!(
+        offer.body["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|w| w["private"] != true),
+        "an empty private window was still sent"
+    );
 }

@@ -748,6 +748,7 @@ fn apply_choice(
             // windows were captured, encrypted, revealed on request, and never
             // actually restored.
             restore_private: choice.restore_private,
+            private_tabs: choice.private_tabs.iter().cloned().collect(),
         });
     }
 

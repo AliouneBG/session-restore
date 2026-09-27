@@ -390,9 +390,12 @@
         const tabs = document.querySelectorAll("input[data-tab]:checked").length;
         const priv = document.getElementById("priv");
         const privOn = !!(priv && priv.checked);
+        const privTabs = document.querySelectorAll(
+          "input[data-private-tab]:checked",
+        ).length;
 
         const restore = document.getElementById("restore");
-        const total = apps + tabs;
+        const total = apps + tabs + privTabs;
         restore.textContent = total ? `Restore selected (${total})` : "Restore selected";
         // Nothing ticked and no private opt-in means the button would do nothing.
         // Saying so up front beats a click that silently achieves nothing.
@@ -419,6 +422,10 @@
           document.getElementById("privlist").innerHTML = "";
           privateRevealed = null;
           btn.textContent = "Show";
+          // The per-tab boxes went with the list, so the selection is back to the
+          // group's all-or-nothing answer. Recount, or the footer keeps claiming a
+          // number the user can no longer see or change.
+          updateSelectionState();
           return;
         }
         btn.disabled = true;
@@ -434,14 +441,56 @@
         }
         const list = document.getElementById("privlist");
         if (!list) return;
+
+        // Per-tab checkboxes, the same as normal tabs get. They only exist once the
+        // user has asked to see these, which is the point: choosing between things you
+        // cannot see is not a choice, and putting the list in the page before then
+        // would undo the reason it is hidden.
         list.innerHTML = windows
           .map(
             (w) =>
               `<ul class="tablist">${w.tabs
-                .map((t) => `<li>${esc(t.title || shortUrl(t.url))}</li>`)
+                .map((t) => {
+                  const id = "ptab-" + esc(t.tab_key);
+                  return `<li class="tabrow">
+                    <input type="checkbox" id="${id}" data-private-tab="${esc(t.tab_key)}" checked />
+                    <label for="${id}" title="${esc(t.url)}">
+                      <span class="tabtitle">${esc(t.title || shortUrl(t.url))}</span>
+                      <span class="taburl">${esc(shortUrl(t.url))}</span>
+                    </label>
+                  </li>`;
+                })
                 .join("")}</ul>`,
           )
           .join("");
+
+        // Revealing means the user is engaging with these, so the group ticks on and
+        // then follows its tabs, the way a browser window follows the tabs inside it.
+        const group = document.getElementById("priv");
+        if (group) group.checked = true;
+
+        for (const box of list.querySelectorAll("input[data-private-tab]")) {
+          box.addEventListener("change", () => {
+            const any = [...list.querySelectorAll("input[data-private-tab]")].some(
+              (b) => b.checked,
+            );
+            if (group) group.checked = any;
+            updateSelectionState();
+          });
+        }
+
+        // Hiding the list again must not silently keep a narrowed selection, because
+        // the user can no longer see what it is.
+        if (group) {
+          group.addEventListener("change", () => {
+            for (const b of list.querySelectorAll("input[data-private-tab]")) {
+              b.checked = group.checked;
+            }
+            updateSelectionState();
+          });
+        }
+
+        updateSelectionState();
       };
 
       window.srData = (payload) => {
@@ -460,11 +509,18 @@
           (el) => el.dataset.tab,
         );
         const priv = document.getElementById("priv");
+        // Empty means "all of them", matching what an untouched tab list means for a
+        // browser window. That is also the only sensible answer when the user ticked
+        // the group without revealing it, because then there is nothing to narrow by.
+        const privateTabs = [
+          ...document.querySelectorAll("input[data-private-tab]:checked"),
+        ].map((el) => el.dataset.privateTab);
         return {
           action: "choose",
           apps,
           browser_windows: windows,
           tabs,
+          private_tabs: privateTabs,
           restore_private: !!(priv && priv.checked),
           never_ask_again: !!neverAsk,
           confirmed: !!confirmed,

@@ -84,6 +84,8 @@ pub struct BrowserSelection {
     pub declined: bool,
     /// The user ticked the private-window box and is asking for those back too.
     pub restore_private: bool,
+    /// Which private tabs specifically. Empty means all of them.
+    pub private_tabs: HashSet<String>,
 }
 
 impl PendingRestore {
@@ -995,11 +997,24 @@ fn maybe_offer_restore(shared: &Shared, browser: &str, profile: &str) -> Result<
     // as possible (ADR-0004).
     if selection.as_ref().map(|s| s.restore_private).unwrap_or(false) {
         match crate::restore::build_private_payload(&db, &shared.keys, snapshot_id, browser, profile, 0) {
-            Ok(private) => {
+            Ok(mut private) => {
+                // Honour the per-tab choice, the same way the normal path does. Empty
+                // means all of them, which is what ticking the group without revealing
+                // it has to mean.
+                if let Some(wanted) = selection.as_ref().map(|s| &s.private_tabs) {
+                    if !wanted.is_empty() {
+                        for w in private.windows.iter_mut() {
+                            w.tabs.retain(|t| wanted.contains(&t.tab_key));
+                        }
+                        private.windows.retain(|w| !w.tabs.is_empty());
+                    }
+                }
+
                 let n = private.windows.len();
+                let tabs: usize = private.windows.iter().map(|w| w.tabs.len()).sum();
                 body.windows.extend(private.windows);
                 if n > 0 {
-                    tracing::info!(browser, windows = n, "including private windows");
+                    tracing::info!(browser, windows = n, tabs, "including private windows");
                 }
             }
             // A private restore that cannot be built must never stop the ordinary one.
