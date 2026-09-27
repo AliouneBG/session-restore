@@ -17,7 +17,7 @@ an API, a test or a number.
 - [In one paragraph](#in-one-paragraph)
 - [The problem that has no supported solution](#the-problem-that-has-no-supported-solution)
 - [Why this class of software is unusually hard to get right](#why-this-class-of-software-is-unusually-hard-to-get-right)
-- [Architecture: four processes, three trust boundaries](#architecture-four-processes-three-trust-boundaries)
+- [Architecture: three processes, three trust boundaries](#architecture-three-processes-three-trust-boundaries)
 - [Fourteen problems that only appear once you build it](#fourteen-problems-that-only-appear-once-you-build-it)
 - [Privacy as a structural property, not a feature](#privacy-as-a-structural-property-not-a-feature)
 - [How correctness was actually established](#how-correctness-was-actually-established)
@@ -134,7 +134,7 @@ section on features.
 
 ---
 
-## Architecture: four processes, three trust boundaries
+## Architecture: three processes, three trust boundaries
 
 ```
   Chrome / Edge / Firefox
@@ -176,10 +176,11 @@ this application exists to do. Everything downstream follows from that single fa
 data directory is per-user, the registry keys are under HKCU, the scheduled task is
 per-user, and the installer never needs administrator.
 
-**One schema, two languages.** `schema/protocol.schema.json` is 566 lines of JSON Schema
+**One schema, two languages.** `schema/protocol.schema.json` is 597 lines of JSON Schema
 and is the single source of truth for the wire protocol. The TypeScript types are
-generated from it; the Rust types are hand-written against it and tested against the same
-fixtures. The two halves cannot drift without a build failure.
+generated from it, so that half cannot drift. The Rust types are hand-written to mirror
+it and tested against the same fixtures, which is discipline rather than a guarantee;
+generating them too is the obvious next step.
 
 ---
 
@@ -345,7 +346,7 @@ rendered on screen by default.
 
 ## How correctness was actually established
 
-There are 333 automated tests. That is the less interesting half.
+There are 365 automated tests. That is the less interesting half.
 
 The more interesting half is that this project treats **"covered by a test"** and
 **"verified by running it"** as different claims, and keeps an explicit, honest list of
@@ -525,18 +526,18 @@ and launcher layer is Win32, though the store, protocol and extension are portab
 
 | | |
 |---|---|
-| Rust | 14,082 lines across 42 files, four crates |
-| TypeScript | 2,358 lines across 17 files, excluding generated code |
-| Interface | 1,450 lines of hand-written HTML and CSS, no framework |
-| Protocol schema | 566 lines of JSON Schema, generating the TypeScript types |
-| Documentation | 2,130 lines across 10 numbered documents and 6 architecture decision records |
-| Tests | 333 total: 265 Rust, 68 TypeScript |
+| Rust | 16,155 lines across 45 files, five crates |
+| TypeScript | 2,469 lines across 17 files, excluding generated code |
+| Interface | 1,823 lines of hand-written HTML and CSS, no framework |
+| Protocol schema | 597 lines of JSON Schema, generating the TypeScript types |
+| Documentation | 2,632 lines across 10 numbered documents and 6 architecture decision records |
+| Tests | 365 total: 297 Rust, 68 TypeScript |
 | Database | 16 tables, SQLite in WAL mode |
-| Win32 surface | 46 distinct APIs, about 50 `unsafe` sites, each with a safety comment |
-| Commits | 32, each with a message explaining the reasoning, not the diff |
+| Win32 surface | 44 distinct APIs, about 50 `unsafe` sites, each with a safety comment |
+| Commits | 37, each with a message explaining the reasoning, not the diff |
 
 The documentation is worth a second look at that ratio. It is roughly one line of prose
-for every seven lines of code, and it is not generated API documentation. It is ten
+for every eight lines of code, and it is not generated API documentation. It is ten
 numbered design documents and six architecture decision records covering the contested
 choices: why a logon agent instead of a Windows Service, why native messaging instead of
 a localhost port, why not Playwright or the DevTools Protocol, what posture to take on
@@ -592,7 +593,7 @@ This is a systems problem on a platform that provides no supported solution, whe
 - correctness depends on **undocumented and counterintuitive operating system
   behaviour** that is not in any tutorial and surfaces only as a deadlock or an access
   denied pointing at the wrong place;
-- the work spans **four processes, two languages, three trust boundaries and a wire
+- the work spans **three processes, two languages, three trust boundaries and a wire
   protocol**, with a browser extension sandbox at one end and raw Win32 at the other;
 - the strongest safety property is enforced by the **type system**, so a class of privacy
   bug cannot be written;

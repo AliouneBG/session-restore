@@ -25,10 +25,12 @@ extension/
   manifest.firefox.json
 ```
 
-`shared/protocol.ts` and the agent's Rust types are both generated from a single JSON
-Schema in `/schema`, so the wire format cannot drift between the two halves. This is
-worth the small build complexity - protocol drift between independently-updated
-components is otherwise a recurring, hard-to-diagnose bug class.
+`shared/protocol.ts` is generated from the single JSON Schema in `/schema`, which is the
+source of truth for the wire format. The agent's Rust types are hand-written to mirror
+that schema rather than generated from it, so the TypeScript half cannot drift and the
+Rust half is kept in step deliberately. Generating both is the obvious improvement:
+protocol drift between independently-updated components is a recurring, hard-to-diagnose
+bug class, and half the protection is not all of it.
 
 ## Manifest - Chrome / Edge
 

@@ -48,7 +48,7 @@
                               +------------------+
 ```
 
-## The four processes
+## The components
 
 ### 1. Browser extension (one build for Chrome/Edge, one for Firefox)
 
@@ -79,7 +79,7 @@ encryption keys, runs restores, and draws the tray icon and review window.
 **It is not a Windows Service.** It is a per-user process launched at logon by a
 Scheduled Task. This is load-bearing - see [ADR-0001](adr/0001-user-agent-not-windows-service.md).
 
-### 4. Local store
+### 4. Local store (not a process: a file the agent owns)
 
 SQLite in WAL mode under `%LOCALAPPDATA%\SessionRestore\`. Schema in
 [02-data-model.md](02-data-model.md).

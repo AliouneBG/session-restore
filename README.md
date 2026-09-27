@@ -407,10 +407,12 @@ SR_LOG=debug                  Environment variable for verbose logging
 ```
 agent/
   crates/
-    sr-agent/     The agent: capture, storage, restore, tray, review window
+    sr-agent/     The agent: capture, storage, restore, and every window
+                  (review, settings, welcome, undo)
     sr-relay/     The thin stdio to named-pipe relay the browser spawns
     sr-proto/     Wire types and framing, shared by agent and relay
     sr-ipc/       Named pipe transport with the SID-scoped ACL
+    sr-setup/     The per-user installer, which never asks for administrator
 extension/
   src/
     background/   Service worker: tab events, reconcile, outbox, port
@@ -418,10 +420,11 @@ extension/
     pages/        Options, and the restore progress page
 schema/
   protocol.schema.json    Single source of truth for the wire protocol
+scripts/          Release packaging, and Firefox add-on signing
 docs/             Architecture, data model, capture, restore, privacy, ADRs
 ```
 
-The protocol schema generates the TypeScript types, so the two halves cannot drift.
+The protocol schema generates the TypeScript types. The Rust types mirror it by hand.
 Never edit the generated file.
 
 ---
@@ -459,6 +462,11 @@ Working and verified by running it, not only by tests:
   against that data with a control.
 - The review window driven end to end, with per-tab selections honoured across the wire.
 - `--undo` re-places the previous windows and launches nothing that is already open.
+- Chromium profiles resolved exactly, by finding the extension's own storage inside the
+  profile directory rather than guessing from the last profile used.
+- Private windows restored, not only captured, when the box is ticked in the review.
+- Selective undo closes only the tabs a restore created, never ones already open.
+- Closing the review window restores nothing, and the session stays available.
 
 Not done:
 

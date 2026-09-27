@@ -77,6 +77,15 @@ listed below.
 - The privacy scan repeated against that data, control included: it **finds**
   `rust-lang.org` and `example.com` in `sessions.db`, and finds **zero** traces of
   either private tab's URL or title anywhere in the data directory
+- The Chromium profile resolved from the extension's own storage on disk rather than
+  guessed, confirmed by the agent's own log on a machine with two profiles:
+  `source="extension storage on disk"`
+- Private windows restored rather than only captured: the review window's private box
+  was wired to nothing, so they were encrypted, revealed on request, and never returned
+- Selective undo listing only the tabs a restore created, with the ones that were
+  already open correctly absent
+- Closing the review window restoring nothing, where it previously behaved as though
+  the user had never been asked and reopened the whole session
 - A browser restarted into the profile it was captured in, proved the hard way: Edge
   had been started with `--load-extension`, so the extension loads *only* if that
   argument is replayed. Launching the bare executable produced no connection at all;
